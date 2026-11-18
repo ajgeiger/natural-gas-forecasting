@@ -9,13 +9,15 @@ import typer
 
 from natgas.config import Settings, load_settings
 from natgas.db import init_db
-from natgas.ingest.prices import ingest_prices
-from natgas.ingest.storage import ingest_storage
-from natgas.ingest.weather import ingest_weather
+from natgas.ingest.prices import PriceLoader
+from natgas.ingest.storage import StorageLoader
+from natgas.ingest.weather import WeatherLoader
 
 app = typer.Typer(help="Natural gas forecasting pipeline.", no_args_is_help=True)
 ingest_app = typer.Typer(help="Load source data into the database.", no_args_is_help=True)
 app.add_typer(ingest_app, name="ingest")
+
+LOADERS = {"prices": PriceLoader, "weather": WeatherLoader, "storage": StorageLoader}
 
 StartOption = typer.Option(None, help="First date, YYYY-MM-DD. Defaults to the config start.")
 EndOption = typer.Option(None, help="Last date, YYYY-MM-DD. Defaults to today.")
@@ -54,7 +56,7 @@ def init_db_command() -> None:
 def ingest_prices_command(start: str = StartOption, end: str = EndOption) -> None:
     """Daily NG=F prices from Yahoo Finance."""
     settings, start_date, end_date = prepare(start, end)
-    rows = ingest_prices(settings, start_date, end_date)
+    rows = LOADERS["prices"](settings).run(start_date, end_date)
     typer.echo(f"prices: {rows} rows")
 
 
@@ -62,7 +64,7 @@ def ingest_prices_command(start: str = StartOption, end: str = EndOption) -> Non
 def ingest_weather_command(start: str = StartOption, end: str = EndOption) -> None:
     """Daily temperatures and degree days from Open-Meteo."""
     settings, start_date, end_date = prepare(start, end)
-    rows = ingest_weather(settings, start_date, end_date)
+    rows = LOADERS["weather"](settings).run(start_date, end_date)
     typer.echo(f"weather: {rows} rows")
 
 
@@ -70,7 +72,7 @@ def ingest_weather_command(start: str = StartOption, end: str = EndOption) -> No
 def ingest_storage_command(start: str = StartOption, end: str = EndOption) -> None:
     """Weekly Lower 48 storage from EIA. Needs EIA_API_KEY."""
     settings, start_date, end_date = prepare(start, end)
-    rows = ingest_storage(settings, start_date, end_date)
+    rows = LOADERS["storage"](settings).run(start_date, end_date)
     typer.echo(f"storage: {rows} rows")
 
 
@@ -80,13 +82,9 @@ def ingest_all_command(start: str = StartOption, end: str = EndOption) -> None:
     settings, start_date, end_date = prepare(start, end)
 
     failed = []
-    for name, loader in (
-        ("prices", ingest_prices),
-        ("weather", ingest_weather),
-        ("storage", ingest_storage),
-    ):
+    for name, loader_class in LOADERS.items():
         try:
-            rows = loader(settings, start_date, end_date)
+            rows = loader_class(settings).run(start_date, end_date)
             typer.echo(f"{name}: {rows} rows")
         except Exception:
             logging.getLogger(__name__).exception("%s ingest failed", name)

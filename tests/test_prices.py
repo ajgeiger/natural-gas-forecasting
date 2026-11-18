@@ -22,19 +22,19 @@ def fake_history(*_args, **_kwargs) -> pd.DataFrame:
     )
 
 
-def test_to_rows_drops_missing_high():
-    rows = prices.to_rows(fake_history())
+def test_to_rows_drops_missing_high(settings):
+    rows = prices.PriceLoader(settings).to_rows(fake_history())
     assert [row["date"] for row in rows] == [date(2024, 1, 2), date(2024, 1, 3)]
     assert rows[0]["high"] == 2.6
     assert rows[0]["volume"] == 100
 
 
-def test_ingest_prices(monkeypatch, settings):
-    monkeypatch.setattr(prices, "fetch_prices", fake_history)
-    count = prices.ingest_prices(settings, date(2024, 1, 1), date(2024, 1, 5))
-    assert count == 2
+def test_run_upserts_prices(monkeypatch, settings):
+    monkeypatch.setattr(prices.PriceLoader, "fetch", fake_history)
+    loader = prices.PriceLoader(settings)
+    assert loader.run(date(2024, 1, 1), date(2024, 1, 5)) == 2
 
     # A rerun should not add rows
-    prices.ingest_prices(settings, date(2024, 1, 1), date(2024, 1, 5))
+    loader.run(date(2024, 1, 1), date(2024, 1, 5))
     with session_scope(settings.db_url) as session:
         assert session.query(Price).count() == 2

@@ -10,7 +10,7 @@ from natgas.ingest import storage
 
 
 def test_skips_without_api_key(settings):
-    assert storage.ingest_storage(settings, date(2024, 1, 1), date(2024, 2, 1)) == 0
+    assert storage.StorageLoader(settings).run(date(2024, 1, 1), date(2024, 2, 1)) == 0
 
     with session_scope(settings.db_url) as session:
         run = session.scalars(select(IngestionRun)).one()
@@ -29,7 +29,7 @@ def test_ingest_storage_follows_pages(settings, monkeypatch):
     responses.get(storage.EIA_URL, json={"response": {"total": 3, "data": records[:2]}})
     responses.get(storage.EIA_URL, json={"response": {"total": 3, "data": records[2:]}})
 
-    assert storage.ingest_storage(settings, date(2024, 1, 1), date(2024, 1, 31)) == 2
+    assert storage.StorageLoader(settings).run(date(2024, 1, 1), date(2024, 1, 31)) == 2
     assert "offset=2" in responses.calls[1].request.url
 
     with session_scope(settings.db_url) as session:
@@ -43,7 +43,7 @@ def test_error_message_hides_api_key(settings):
     responses.get(storage.EIA_URL, status=403)
 
     with pytest.raises(RuntimeError) as error:
-        storage.ingest_storage(settings, date(2024, 1, 1), date(2024, 1, 31))
+        storage.StorageLoader(settings).run(date(2024, 1, 1), date(2024, 1, 31))
     assert "secret-key" not in str(error.value)
 
     with session_scope(settings.db_url) as session:

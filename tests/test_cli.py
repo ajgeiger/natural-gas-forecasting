@@ -17,20 +17,28 @@ def test_ingest_all_keeps_going_after_failure(tmp_path, monkeypatch):
     monkeypatch.setenv("NATGAS_DB_URL", f"sqlite:///{tmp_path / 'cli.db'}")
     called = []
 
-    def broken(*_args):
-        called.append("prices")
-        raise RuntimeError("no data")
+    def fake_loader(name, fails=False):
+        class FakeLoader:
+            def __init__(self, _settings):
+                pass
 
-    def working(name):
-        def loader(*_args):
-            called.append(name)
-            return 5
+            def run(self, _start, _end):
+                called.append(name)
+                if fails:
+                    raise RuntimeError("no data")
+                return 5
 
-        return loader
+        return FakeLoader
 
-    monkeypatch.setattr(cli, "ingest_prices", broken)
-    monkeypatch.setattr(cli, "ingest_weather", working("weather"))
-    monkeypatch.setattr(cli, "ingest_storage", working("storage"))
+    monkeypatch.setattr(
+        cli,
+        "LOADERS",
+        {
+            "prices": fake_loader("prices", fails=True),
+            "weather": fake_loader("weather"),
+            "storage": fake_loader("storage"),
+        },
+    )
 
     result = runner.invoke(
         cli.app, ["ingest", "all", "--start", "2024-01-01", "--end", "2024-01-31"]

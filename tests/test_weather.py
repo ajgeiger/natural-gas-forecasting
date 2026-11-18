@@ -40,7 +40,7 @@ def test_ingest_weather_joins_archive_and_forecast(settings):
     forecast_temps = [32.0 + i for i in range(11)]
     responses.get(weather.FORECAST_URL, json=daily_payload(date(2024, 1, 3), forecast_temps))
 
-    count = weather.ingest_weather(settings, date(2024, 1, 1), today, today=today)
+    count = weather.WeatherLoader(settings, today=today).run(date(2024, 1, 1), today)
     assert count == 13
 
     assert "end_date=2024-01-03" in responses.calls[0].request.url

@@ -13,7 +13,8 @@ from datetime import date, timedelta
 import requests
 
 from natgas.config import Location, Settings
-from natgas.db import WeatherDaily, session_scope, upsert
+from natgas.db import WeatherDaily
+from natgas.ingest.base import Loader
 from natgas.ingest.runs import tracked_run
 
 log = logging.getLogger(__name__)
@@ -88,57 +89,61 @@ def fetch_daily_mean(url: str, location: Location, start: date, end: date) -> di
     return temps
 
 
-def location_rows(
-    location: Location, start: date, end: date, base_temp_f: float, today: date
-) -> list[dict]:
-    temps: dict[date, float] = {}
+class WeatherLoader(Loader):
+    """Observed weather per city, plus the forecast window when the range reaches today."""
 
-    archive_end = min(end, today - timedelta(days=ARCHIVE_LAG_DAYS))
-    if start <= archive_end:
-        temps.update(fetch_daily_mean(ARCHIVE_URL, location, start, archive_end))
+    name = "weather"
+    table = WeatherDaily
 
-    # The forecast API only reaches about three months back
-    forecast_start = max(temps) + timedelta(days=1) if temps else start
-    forecast_start = max(forecast_start, today - timedelta(days=FORECAST_MAX_PAST_DAYS))
-    if forecast_start <= end:
-        temps.update(fetch_daily_mean(FORECAST_URL, location, forecast_start, end))
+    def __init__(self, settings: Settings, today: date | None = None) -> None:
+        super().__init__(settings)
+        self.today = today or date.today()
 
-    rows = []
-    for day, tavg_f in sorted(temps.items()):
-        hdd, cdd = degree_days(tavg_f, base_temp_f)
-        rows.append(
-            {
-                "date": day,
-                "location": location.name,
-                "tavg_f": round(tavg_f, 2),
-                "hdd": hdd,
-                "cdd": cdd,
-                "is_forecast": day > today,
-            }
-        )
-    return rows
+    def location_rows(self, location: Location, start: date, end: date) -> list[dict]:
+        temps: dict[date, float] = {}
 
+        archive_end = min(end, self.today - timedelta(days=ARCHIVE_LAG_DAYS))
+        if start <= archive_end:
+            temps.update(fetch_daily_mean(ARCHIVE_URL, location, start, archive_end))
 
-def ingest_weather(settings: Settings, start: date, end: date, today: date | None = None) -> int:
-    """Load observed weather for [start, end], plus the forecast window when end is today."""
-    today = today or date.today()
-    if end >= today:
-        end = today + timedelta(days=settings.forecast_days)
+        # The forecast API only reaches about three months back
+        forecast_start = max(temps) + timedelta(days=1) if temps else start
+        forecast_start = max(forecast_start, self.today - timedelta(days=FORECAST_MAX_PAST_DAYS))
+        if forecast_start <= end:
+            temps.update(fetch_daily_mean(FORECAST_URL, location, forecast_start, end))
 
-    with tracked_run(settings.db_url, "weather") as run:
-        failed = []
-        for location in settings.locations:
-            # Keep going if one city fails so the rest still load
-            try:
-                rows = location_rows(location, start, end, settings.base_temp_f, today)
-            except (requests.RequestException, ValueError, KeyError) as exc:
-                log.error("weather %s failed: %s", location.name, exc)
-                failed.append(location.name)
-                continue
-            with session_scope(settings.db_url) as session:
-                run.rows += upsert(session, WeatherDaily, rows)
-            log.info("weather %s: %d rows", location.name, len(rows))
+        rows = []
+        for day, tavg_f in sorted(temps.items()):
+            hdd, cdd = degree_days(tavg_f, self.settings.base_temp_f)
+            rows.append(
+                {
+                    "date": day,
+                    "location": location.name,
+                    "tavg_f": round(tavg_f, 2),
+                    "hdd": hdd,
+                    "cdd": cdd,
+                    "is_forecast": day > self.today,
+                }
+            )
+        return rows
 
-        if failed:
-            raise RuntimeError(f"weather failed for: {', '.join(failed)}")
-    return run.rows
+    def run(self, start: date, end: date) -> int:
+        if end >= self.today:
+            end = self.today + timedelta(days=self.settings.forecast_days)
+
+        with tracked_run(self.settings.db_url, self.name) as run:
+            failed = []
+            for location in self.settings.locations:
+                # Keep going if one city fails so the rest still load
+                try:
+                    rows = self.location_rows(location, start, end)
+                except (requests.RequestException, ValueError, KeyError) as exc:
+                    log.error("weather %s failed: %s", location.name, exc)
+                    failed.append(location.name)
+                    continue
+                run.rows += self.save(rows)
+                log.info("weather %s: %d rows", location.name, len(rows))
+
+            if failed:
+                raise RuntimeError(f"weather failed for: {', '.join(failed)}")
+        return run.rows
