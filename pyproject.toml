@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "natgas"
+version = "0.1.0"
+description = "Daily forecasts of natural gas futures prices"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+authors = [{ name = "Alex Geiger" }]
+dependencies = [
+    "pandas>=2.0",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+    "sqlalchemy>=2.0",
+    "typer>=0.12",
+    "yfinance>=0.2.54",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "responses>=0.25",
+    "ruff>=0.6",
+]
+# filled in by later PRs
+models = []
+dashboard = []
+
+[project.scripts]
+natgas = "natgas.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
