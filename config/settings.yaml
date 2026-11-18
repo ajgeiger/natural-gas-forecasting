@@ -1,0 +1,29 @@
+# Relative sqlite paths are resolved from the project root.
+# NATGAS_DB_URL overrides this, e.g. postgresql+psycopg://user:pass@host/natgas
+database:
+  url: sqlite:///data/natgas.db
+
+ingest:
+  default_start: "2015-01-01"
+
+prices:
+  ticker: NG=F
+
+storage:
+  # EIA weekly working gas in underground storage, Lower 48 (Bcf)
+  series: NW2_EPG0_SWO_R48_BCF
+  region: lower48
+
+weather:
+  base_temp_f: 65
+  forecast_days: 14
+  # Cities with large heating and power demand for gas
+  locations:
+    - { name: chicago, latitude: 41.88, longitude: -87.63 }
+    - { name: new_york, latitude: 40.71, longitude: -74.01 }
+    - { name: boston, latitude: 42.36, longitude: -71.06 }
+    - { name: philadelphia, latitude: 39.95, longitude: -75.17 }
+    - { name: detroit, latitude: 42.33, longitude: -83.05 }
+    - { name: houston, latitude: 29.76, longitude: -95.37 }
+    - { name: atlanta, latitude: 33.75, longitude: -84.39 }
+    - { name: dallas, latitude: 32.78, longitude: -96.80 }
