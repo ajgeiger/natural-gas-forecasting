@@ -1,4 +1,4 @@
-"""Command line entry point: natgas init-db, natgas ingest ..."""
+"""Command line entry point: natgas init-db, natgas ingest ..., natgas spark-show."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ import typer
 
 from natgas.config import Settings, load_settings
 from natgas.db import init_db
-from natgas.ingest.prices import PriceLoader
-from natgas.ingest.storage import StorageLoader
-from natgas.ingest.weather import WeatherLoader
+from natgas.de.prices import PriceLoader
+from natgas.de.storage import StorageLoader
+from natgas.de.weather import WeatherLoader
 
 app = typer.Typer(help="Natural gas forecasting pipeline.", no_args_is_help=True)
 ingest_app = typer.Typer(help="Load source data into the database.", no_args_is_help=True)
@@ -96,3 +96,19 @@ def ingest_all_command(start: str = StartOption, end: str = EndOption) -> None:
 
 if __name__ == "__main__":
     app()
+
+
+@app.command("spark-show")
+def spark_show_command(table: str, rows: int = typer.Option(5, help="Rows to print.")) -> None:
+    """Read a table with Spark and print its schema and newest rows. Needs the spark extra."""
+    from natgas.de.spark_db import SparkDatabase
+
+    settings = load_settings()
+    database = SparkDatabase(settings.db_url)
+    try:
+        frame = database.read_table(table)
+        frame.printSchema()
+        frame.orderBy(frame.columns[0], ascending=False).show(rows, truncate=False)
+        typer.echo(f"{table}: {frame.count()} rows")
+    finally:
+        database.stop()

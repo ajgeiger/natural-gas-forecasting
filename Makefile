@@ -18,4 +18,7 @@ init-db:
 ingest:
 	natgas ingest all
 
-.PHONY: install lint format test init-db ingest
+spark-show:
+	natgas spark-show prices
+
+.PHONY: install lint format test init-db ingest spark-show

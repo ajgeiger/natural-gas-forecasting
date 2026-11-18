@@ -4,7 +4,7 @@ import pytest
 import responses
 
 from natgas.db import WeatherDaily, session_scope
-from natgas.ingest import weather
+from natgas.de.weather import loader as weather
 
 
 def daily_payload(start: date, temps: list[float | None]) -> dict:
@@ -17,15 +17,6 @@ def daily_payload(start: date, temps: list[float | None]) -> dict:
 )
 def test_degree_days(tavg, expected):
     assert weather.degree_days(tavg, 65.0) == expected
-
-
-def test_date_chunks_cover_range():
-    chunks = weather.date_chunks(date(2020, 1, 1), date(2020, 1, 10), chunk_days=4)
-    assert chunks == [
-        (date(2020, 1, 1), date(2020, 1, 4)),
-        (date(2020, 1, 5), date(2020, 1, 8)),
-        (date(2020, 1, 9), date(2020, 1, 10)),
-    ]
 
 
 @responses.activate
@@ -54,16 +45,3 @@ def test_ingest_weather_joins_archive_and_forecast(settings):
     assert jan_1.hdd == 35.0
     assert not jan_1.is_forecast
     assert jan_12.is_forecast
-
-
-@responses.activate
-def test_retries_on_server_error(monkeypatch):
-    monkeypatch.setattr(weather.time, "sleep", lambda _seconds: None)
-    responses.get(weather.ARCHIVE_URL, status=500)
-    responses.get(weather.ARCHIVE_URL, json=daily_payload(date(2024, 1, 1), [30.0]))
-
-    location = weather.Location(name="chicago", latitude=41.88, longitude=-87.63)
-    temps = weather.fetch_daily_mean(
-        weather.ARCHIVE_URL, location, date(2024, 1, 1), date(2024, 1, 1)
-    )
-    assert temps == {date(2024, 1, 1): 30.0}

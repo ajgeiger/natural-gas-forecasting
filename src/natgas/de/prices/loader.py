@@ -8,7 +8,7 @@ import pandas as pd
 import yfinance as yf
 
 from natgas.db import Price
-from natgas.ingest.base import Loader
+from natgas.de.utils import Loader
 
 
 class PriceLoader(Loader):

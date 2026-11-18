@@ -7,6 +7,7 @@ The goal is a small system that runs on its own: pull fresh data each day, keep 
 ## Roadmap
 
 - [x] Database and data loaders for prices, weather, and storage
+- [x] Spark access to the database over JDBC
 - [ ] Data checks for stale, missing, and duplicate data
 - [ ] Shared model interface (train, predict, save, load from YAML) with ARIMA, Greykite, and Chronos-2
 - [ ] Rolling-origin backtests and a scoreboard (WAPE, MAE, RMSE, bias)
@@ -38,6 +39,32 @@ natgas ingest storage
 
 Loaders upsert on each table's key, so reruns do not create duplicates. Every run is logged to the `ingestion_runs` table.
 
+## Spark
+
+The SQL database is the system of record and the loaders write to it. `SparkDatabase` in `src/natgas/de/spark_db.py` reads and writes the same tables over JDBC, so later jobs can run on Spark without moving the data.
+
+```bash
+pip install -e ".[dev,spark]"
+natgas spark-show prices
+```
+
+```python
+from natgas.config import load_settings
+from natgas.de.spark_db import SparkDatabase
+
+database = SparkDatabase(load_settings().db_url)
+prices = database.read_table("prices")
+database.write_table(prices.select("date", "high"), "prices_high", mode="overwrite")
+```
+
+- Needs Java 17, with `JAVA_HOME` set or `java` on the path.
+- The JDBC driver (sqlite-jdbc, or the Postgres driver when `NATGAS_DB_URL` is Postgres) is downloaded from Maven Central the first time Spark starts.
+- JDBC writes append or overwrite, they do not upsert. Write Spark output to its own tables and leave the loader tables to the loaders.
+- Timestamps written from Spark to SQLite keep milliseconds only.
+- On Windows, Spark warns at startup that `winutils.exe` and `HADOOP_HOME` are missing. Database reads and writes work without them; they are only needed to write files such as Parquet or CSV.
+
+The Spark tests skip when pyspark or Java is not installed.
+
 Run `make lint` and `make test` before opening a PR.
 
 ## Configuration
@@ -62,12 +89,13 @@ Settings live in `config/settings.yaml` (ticker, storage series, cities, degree 
 
 ```mermaid
 flowchart LR
-    yahoo[Yahoo Finance] --> prices[ingest prices]
-    meteo[Open-Meteo] --> weather[ingest weather]
-    eia[EIA API] --> storage[ingest storage]
+    yahoo[Yahoo Finance] --> prices[de/prices]
+    meteo[Open-Meteo] --> weather[de/weather]
+    eia[EIA API] --> storage[de/storage]
     prices --> db[(SQL database)]
     weather --> db
     storage --> db
+    db <--> spark[Spark over JDBC]
     db --> models[models and backtests]
     models --> mlflow[MLflow registry]
     mlflow --> forecast[daily forecast]
@@ -83,7 +111,12 @@ Only the ingestion side exists so far; the rest is planned.
 config/settings.yaml    tickers, series, cities
 src/natgas/config.py    settings loader
 src/natgas/db/          tables, sessions, upsert
-src/natgas/ingest/      one loader per source
+src/natgas/de/          data loading
+  prices/               PriceLoader (Yahoo Finance)
+  weather/              WeatherLoader (Open-Meteo)
+  storage/              StorageLoader (EIA)
+  utils.py              Loader base class, run logging, HTTP retries, date ranges
+  spark_db.py           SparkDatabase, reads and writes the database over JDBC
 src/natgas/cli.py       natgas command
 tests/                  pytest, no network calls
 ```

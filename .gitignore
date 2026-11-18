@@ -18,6 +18,11 @@ mlruns/
 mlartifacts/
 models/
 
+# spark
+spark-warehouse/
+metastore_db/
+derby.log
+
 # secrets
 .env
 

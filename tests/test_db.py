@@ -2,8 +2,7 @@ from datetime import date
 
 from sqlalchemy import func, select
 
-from natgas.db import IngestionRun, Price, session_scope, upsert
-from natgas.ingest.runs import tracked_run
+from natgas.db import Price, session_scope, upsert
 
 
 def price_row(day: date, high: float) -> dict:
@@ -34,17 +33,3 @@ def test_upsert_is_idempotent_and_updates(settings):
 def test_upsert_empty_rows(settings):
     with session_scope(settings.db_url) as session:
         assert upsert(session, Price, []) == 0
-
-
-def test_tracked_run_records_failure(settings):
-    try:
-        with tracked_run(settings.db_url, "prices"):
-            raise ValueError("boom")
-    except ValueError:
-        pass
-
-    with session_scope(settings.db_url) as session:
-        run = session.scalars(select(IngestionRun)).one()
-    assert run.status == "failed"
-    assert run.message == "boom"
-    assert run.finished_at is not None

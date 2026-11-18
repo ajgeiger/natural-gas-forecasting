@@ -6,7 +6,7 @@ import responses
 from sqlalchemy import select
 
 from natgas.db import IngestionRun, StorageWeekly, session_scope
-from natgas.ingest import storage
+from natgas.de.storage import loader as storage
 
 
 def test_skips_without_api_key(settings):

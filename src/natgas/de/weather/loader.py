@@ -7,15 +7,11 @@ API fills the gap from the last archived day through the forecast horizon.
 from __future__ import annotations
 
 import logging
-import time
 from datetime import date, timedelta
-
-import requests
 
 from natgas.config import Location, Settings
 from natgas.db import WeatherDaily
-from natgas.ingest.base import Loader
-from natgas.ingest.runs import tracked_run
+from natgas.de.utils import Loader, date_chunks, get_json, tracked_run
 
 log = logging.getLogger(__name__)
 
@@ -24,10 +20,8 @@ FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 # The newest archive days are still being written and can fail to load
 ARCHIVE_LAG_DAYS = 7
 FORECAST_MAX_PAST_DAYS = 90
-TIMEOUT_SECONDS = 60
 # Long archive requests sometimes fail mid-stream, so history is pulled a year at a time
 CHUNK_DAYS = 366
-MAX_ATTEMPTS = 5
 
 
 def degree_days(tavg_f: float, base_temp_f: float) -> tuple[float, float]:
@@ -37,40 +31,9 @@ def degree_days(tavg_f: float, base_temp_f: float) -> tuple[float, float]:
     return round(hdd, 2), round(cdd, 2)
 
 
-def date_chunks(start: date, end: date, chunk_days: int = CHUNK_DAYS) -> list[tuple[date, date]]:
-    chunks = []
-    chunk_start = start
-    while chunk_start <= end:
-        chunk_end = min(end, chunk_start + timedelta(days=chunk_days - 1))
-        chunks.append((chunk_start, chunk_end))
-        chunk_start = chunk_end + timedelta(days=1)
-    return chunks
-
-
-def get_json(url: str, params: dict) -> dict:
-    """GET with a few retries on server errors or a cut-off response."""
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        try:
-            response = requests.get(url, params=params, timeout=TIMEOUT_SECONDS)
-            response.raise_for_status()
-            return response.json()
-        except (requests.RequestException, ValueError) as exc:
-            client_error = (
-                isinstance(exc, requests.HTTPError)
-                and exc.response is not None
-                and 400 <= exc.response.status_code < 500
-                and exc.response.status_code != 429
-            )
-            if client_error or attempt == MAX_ATTEMPTS:
-                raise
-            log.warning("open-meteo request failed (%s), retrying", exc)
-            time.sleep(2**attempt)
-    raise RuntimeError("unreachable")
-
-
 def fetch_daily_mean(url: str, location: Location, start: date, end: date) -> dict[date, float]:
     temps: dict[date, float] = {}
-    for chunk_start, chunk_end in date_chunks(start, end):
+    for chunk_start, chunk_end in date_chunks(start, end, CHUNK_DAYS):
         params = {
             "latitude": location.latitude,
             "longitude": location.longitude,
@@ -137,7 +100,7 @@ class WeatherLoader(Loader):
                 # Keep going if one city fails so the rest still load
                 try:
                     rows = self.location_rows(location, start, end)
-                except (requests.RequestException, ValueError, KeyError) as exc:
+                except (RuntimeError, KeyError) as exc:
                     log.error("weather %s failed: %s", location.name, exc)
                     failed.append(location.name)
                     continue

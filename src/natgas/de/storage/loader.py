@@ -5,17 +5,13 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-import requests
-
 from natgas.db import StorageWeekly
-from natgas.ingest.base import Loader
-from natgas.ingest.runs import tracked_run
+from natgas.de.utils import Loader, get_json, tracked_run
 
 log = logging.getLogger(__name__)
 
 EIA_URL = "https://api.eia.gov/v2/natural-gas/stor/wkly/data/"
 PAGE_SIZE = 5000
-TIMEOUT_SECONDS = 60
 
 
 class StorageLoader(Loader):
@@ -39,14 +35,7 @@ class StorageLoader(Loader):
                 "offset": offset,
                 "length": PAGE_SIZE,
             }
-            # Errors are re-raised without the request url so the api key stays out of logs
-            try:
-                response = requests.get(EIA_URL, params=params, timeout=TIMEOUT_SECONDS)
-            except requests.RequestException as exc:
-                raise RuntimeError(f"EIA request failed: {type(exc).__name__}") from None
-            if not response.ok:
-                raise RuntimeError(f"EIA request failed with status {response.status_code}")
-            body = response.json()["response"]
+            body = get_json(EIA_URL, params)["response"]
             page = body.get("data", [])
             records.extend(page)
 

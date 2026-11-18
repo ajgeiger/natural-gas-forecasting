@@ -24,6 +24,8 @@ dev = [
     "responses>=0.25",
     "ruff>=0.6",
 ]
+# Spark also needs Java 17
+spark = ["pyspark>=3.5,<4"]
 # filled in by later PRs
 models = []
 dashboard = []
