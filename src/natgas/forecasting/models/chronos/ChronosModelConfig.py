@@ -49,7 +49,7 @@ class ChronosModelConfig(AbstractConfigWrapper):
     @classmethod
     def default_grid(cls) -> dict[str, list]:
         return {
-            "context_length": [128, 512, 2048],
+            "context_length": [512, 1024, 2048],
             "use_weather": [True, False],
             "use_yearly": [True, False],
         }
