@@ -11,6 +11,7 @@ from mlflow import MlflowClient
 from natgas.forecasting.backtesting import Backtester, BacktestReport, ForecastMetrics
 from natgas.forecasting.data import (
     AbstractFeatureSource,
+    CalendarFeatureSource,
     ForecastDataProvider,
     HolidayFeatureSource,
     StorageFeatureSource,
@@ -95,7 +96,7 @@ def provider(holiday_source: HolidayFeatureSource) -> ForecastDataProvider:
             "cdd": rng.uniform(0, 10, len(weather_days)),
         }
     )
-    sources = [WeatherFeatureSource(weather), holiday_source]
+    sources = [WeatherFeatureSource(weather), holiday_source, CalendarFeatureSource()]
     return ForecastDataProvider(target, sources, horizon_days=5)
 
 
@@ -149,6 +150,8 @@ def test_grid_expands_every_combination() -> None:
     configs = HyperparameterGrid({"a": [1, 2], "b": [True, False], "c": 5}).configs()
     assert len(configs) == 4
     assert {"a": 2, "b": False, "c": 5} in configs
+    joined = HyperparameterGrid([{"a": [1, 2]}, {"a": 3, "b": [True, False]}]).configs()
+    assert joined == [{"a": 1}, {"a": 2}, {"a": 3, "b": True}, {"a": 3, "b": False}]
 
 
 def test_configs_validate_and_round_trip() -> None:
@@ -159,6 +162,30 @@ def test_configs_validate_and_round_trip() -> None:
     assert GreykiteModelConfig(use_holidays=False).required_features == []
     assert ChronosModelConfig().required_features == ["hdd", "cdd"]
     assert ChronosModelConfig().max_horizon_days == 1024
+    calendar = GradientBoostingModelConfig(
+        use_weather=False, use_yearly=True, weekly_harmonics=1, use_weekend=True
+    )
+    assert calendar.required_features == [
+        "year_sin_1",
+        "year_cos_1",
+        "year_sin_2",
+        "year_cos_2",
+        "week_sin_1",
+        "week_cos_1",
+        "after_weekend",
+    ]
+    assert ChronosModelConfig(weekly_harmonics=2).required_features == [
+        "hdd",
+        "cdd",
+        "week_sin_1",
+        "week_cos_1",
+        "week_sin_2",
+        "week_cos_2",
+    ]
+    with pytest.raises(ValueError):
+        GradientBoostingModelConfig(weekly_harmonics=3)
+    with pytest.raises(ValueError):
+        ChronosModelConfig(weekly_harmonics=-1)
     with pytest.raises(ValueError):
         GradientBoostingModelConfig.from_dict({"not_a_setting": 1})
     with pytest.raises(ValueError):
@@ -248,6 +275,46 @@ def test_holiday_dummies_mark_days_around_each_holiday(
     assert observed.loc["2026-07-03", "independence_day"] == 1
 
 
+def test_calendar_columns_follow_the_settings() -> None:
+    assert CalendarFeatureSource().columns == [
+        "year_sin_1",
+        "year_cos_1",
+        "year_sin_2",
+        "year_cos_2",
+        "week_sin_1",
+        "week_cos_1",
+        "week_sin_2",
+        "week_cos_2",
+        "after_weekend",
+    ]
+    assert CalendarFeatureSource.column_names(False, 1, False) == ["week_sin_1", "week_cos_1"]
+    assert CalendarFeatureSource.column_names(False, 0, False) == []
+
+
+def test_calendar_values_for_known_dates() -> None:
+    # Saturday August 30 to Tuesday September 2, 2025
+    dates = pd.date_range("2025-08-30", "2025-09-02")
+    features = CalendarFeatureSource().features_for(dates, dates[0])
+    assert features["after_weekend"].tolist() == [0.0, 1.0, 1.0, 0.0]
+    monday = features.loc["2025-09-01"]
+    assert monday["week_sin_1"] == pytest.approx(0.0)
+    assert monday["week_cos_1"] == pytest.approx(1.0)
+    assert monday["year_sin_1"] == pytest.approx(np.sin(2 * np.pi * 244 / 365.25))
+    assert monday["year_cos_2"] == pytest.approx(np.cos(4 * np.pi * 244 / 365.25))
+    tuesday = features.loc["2025-09-02"]
+    assert tuesday["week_sin_2"] == pytest.approx(np.sin(4 * np.pi / 7))
+
+
+def test_calendar_features_cover_future_dates(provider: ForecastDataProvider) -> None:
+    window = provider.window(provider.last_date)
+    columns = CalendarFeatureSource().columns
+    future = window.future_features[columns]
+    assert window.forecast_dates.min() > window.as_of
+    assert future.notna().all().all()
+    expected = CalendarFeatureSource().features_for(window.forecast_dates, window.as_of)
+    pd.testing.assert_frame_equal(future, expected)
+
+
 def test_holiday_dummies_cover_future_dates(provider: ForecastDataProvider) -> None:
     window = provider.window(provider.last_date)
     columns = HolidayFeatureSource.column_names(4)
@@ -308,8 +375,14 @@ def test_backtester_records_each_as_of(provider: ForecastDataProvider) -> None:
     [
         NaiveModelConfig(),
         GradientBoostingModelConfig(max_iter=20, use_weather=True),
+        GradientBoostingModelConfig(
+            max_iter=20, use_yearly=True, weekly_harmonics=2, use_weekend=True
+        ),
         GreykiteModelConfig(history_years=0, fit_algorithm="ridge"),
         ChronosModelConfig(context_length=64, use_weather=True),
+        ChronosModelConfig(
+            context_length=64, use_yearly=True, weekly_harmonics=1, use_weekend=True
+        ),
     ],
 )
 def test_models_forecast_30_days_ahead(

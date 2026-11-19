@@ -22,10 +22,10 @@ ID_COLUMN = "id"
 class ChronosModel(AbstractModelWrapper):
     """Pretrained Chronos-2 model from Amazon, used without any fine tuning.
 
-    train() keeps the last context_length prices, and weather when that is
-    enabled, on a business day calendar. predict() hands them to Chronos-2.
-    When use_weather is on, heating and cooling degree days are passed as
-    known future covariates for the forecast dates.
+    train() keeps the last context_length prices, plus any weather and
+    calendar columns the config turns on, on a business day calendar.
+    predict() hands them to Chronos-2, with those columns for the forecast
+    dates passed as known future covariates.
 
     The model weights are downloaded from Hugging Face once and cached. They
     are not saved with the model folder, only the model id is.
@@ -58,7 +58,7 @@ class ChronosModel(AbstractModelWrapper):
         columns = ["price", *self.config.required_features]
         history = training_data[columns].dropna(subset=["price"])
         # Chronos-2 needs a regular time grid, so holidays carry the previous
-        # price and weather forward, the same way Greykite does.
+        # row forward, the same way Greykite does.
         calendar = pd.bdate_range(history.index[0], history.index[-1])
         history = history.reindex(calendar).ffill()
         for column in self.config.required_features:

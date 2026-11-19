@@ -1,6 +1,7 @@
 """Data access for models. Everything here respects the as-of date."""
 
 from natgas.forecasting.data.AbstractFeatureSource import AbstractFeatureSource
+from natgas.forecasting.data.CalendarFeatureSource import CalendarFeatureSource
 from natgas.forecasting.data.ForecastDataProvider import ForecastDataProvider
 from natgas.forecasting.data.ForecastWindow import ForecastWindow
 from natgas.forecasting.data.HolidayFeatureSource import HolidayFeatureSource
@@ -10,6 +11,7 @@ from natgas.forecasting.data.WeatherFeatureSource import WeatherFeatureSource
 
 __all__ = [
     "AbstractFeatureSource",
+    "CalendarFeatureSource",
     "ForecastDataProvider",
     "ForecastWindow",
     "HolidayFeatureSource",

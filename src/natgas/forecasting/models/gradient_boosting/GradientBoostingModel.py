@@ -1,4 +1,4 @@
-"""Gradient boosted trees on recent price changes and weather."""
+"""Gradient boosted trees on recent price changes, weather, and the calendar."""
 
 from __future__ import annotations
 
@@ -21,9 +21,11 @@ HISTORY_FILE = "recent_prices.csv"
 class GradientBoostingModel(AbstractModelWrapper):
     """Predicts the next daily price change, then rolls forward one day at a time.
 
-    Features for each day are the last n_lags daily changes plus, when
-    use_weather is on, that day's degree days. Trees cannot extrapolate to price
-    levels they have not seen, so the model learns changes instead of levels.
+    Features for each day are the last n_lags daily changes plus that day's
+    degree days and calendar features, when the config turns them on. Weather
+    and calendar values for the forecast dates come from future_features.
+    Trees cannot extrapolate to price levels they have not seen, so the model
+    learns changes instead of levels.
     To forecast several days ahead, each predicted change becomes a lag for the
     next day.
     """
@@ -35,13 +37,13 @@ class GradientBoostingModel(AbstractModelWrapper):
         self.regressor: HistGradientBoostingRegressor | None = None
         self.recent_prices: pd.Series | None = None
 
-    def build_features(self, changes: pd.Series, weather: pd.DataFrame) -> pd.DataFrame:
-        """Lagged changes for each date, plus that date's weather if enabled."""
+    def build_features(self, changes: pd.Series, extra: pd.DataFrame) -> pd.DataFrame:
+        """Lagged changes for each date, plus that date's weather and calendar columns."""
         n_lags = self.config.n_lags
         lags = {f"change_lag_{k}": changes.shift(k) for k in range(1, n_lags + 1)}
         features = pd.DataFrame(lags, index=changes.index)
         for column in self.config.required_features:
-            features[column] = weather.get(column, np.nan)
+            features[column] = extra.get(column, np.nan)
         return features
 
     def train(self, training_data: pd.DataFrame) -> None:

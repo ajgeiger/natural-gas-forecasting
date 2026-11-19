@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from natgas.forecasting.data.CalendarFeatureSource import (
+    MAX_WEEKLY_HARMONICS,
+    CalendarFeatureSource,
+)
 from natgas.forecasting.models.base.AbstractConfigWrapper import AbstractConfigWrapper
 
 
@@ -19,6 +23,9 @@ class GradientBoostingModelConfig(AbstractConfigWrapper):
     l2_regularization: float = 0.0
     use_weather: bool = True
     weather_columns: list[str] = field(default_factory=lambda: ["hdd", "cdd"])
+    use_yearly: bool = False
+    weekly_harmonics: int = 0
+    use_weekend: bool = False
     random_state: int = 42
 
     def validate(self) -> None:
@@ -30,15 +37,20 @@ class GradientBoostingModelConfig(AbstractConfigWrapper):
             raise ValueError("max_depth, max_iter, and min_samples_leaf must be at least 1")
         if self.l2_regularization < 0:
             raise ValueError("l2_regularization cannot be negative")
+        if not 0 <= self.weekly_harmonics <= MAX_WEEKLY_HARMONICS:
+            raise ValueError(f"weekly_harmonics must be between 0 and {MAX_WEEKLY_HARMONICS}")
 
     @classmethod
-    def default_grid(cls) -> dict[str, list]:
-        return {
+    def default_grid(cls) -> list[dict[str, list]]:
+        base = {
             "n_lags": [5, 10],
             "learning_rate": [0.03, 0.1],
             "max_depth": [2, 4],
             "use_weather": [True, False],
         }
+        # Calendar features all off, or all on with 1 or 2 weekly harmonics
+        calendar = {"use_yearly": True, "weekly_harmonics": [1, 2], "use_weekend": True}
+        return [base, {**base, **calendar}]
 
     @classmethod
     def default_search_space(cls) -> dict:
@@ -48,11 +60,18 @@ class GradientBoostingModelConfig(AbstractConfigWrapper):
             "max_depth": {"low": 2, "high": 6},
             "min_samples_leaf": {"low": 10, "high": 100, "log": True},
             "use_weather": [True, False],
+            "use_yearly": [True, False],
+            "weekly_harmonics": {"low": 0, "high": MAX_WEEKLY_HARMONICS},
+            "use_weekend": [True, False],
         }
 
     @property
     def required_features(self) -> list[str]:
-        return list(self.weather_columns) if self.use_weather else []
+        weather = list(self.weather_columns) if self.use_weather else []
+        calendar = CalendarFeatureSource.column_names(
+            self.use_yearly, self.weekly_harmonics, self.use_weekend
+        )
+        return weather + calendar
 
     @property
     def min_training_rows(self) -> int:

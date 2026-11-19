@@ -34,17 +34,28 @@ models:
   naive: {}
 
   gradient_boosting:
+    # A list of grids: calendar features all off, or all on with 1 or 2 weekly harmonics
     grid:
-      n_lags: [5, 10]
-      learning_rate: [0.03, 0.1]
-      max_depth: [2, 4]
-      use_weather: [true, false]
+      - n_lags: [5, 10]
+        learning_rate: [0.03, 0.1]
+        max_depth: [2, 4]
+        use_weather: [true, false]
+      - n_lags: [5, 10]
+        learning_rate: [0.03, 0.1]
+        max_depth: [2, 4]
+        use_weather: [true, false]
+        use_yearly: true
+        weekly_harmonics: [1, 2]
+        use_weekend: true
     search_space:
       n_lags: {low: 3, high: 20}
       learning_rate: {low: 0.01, high: 0.3, log: true}
       max_depth: {low: 2, high: 6}
       min_samples_leaf: {low: 10, high: 100, log: true}
       use_weather: [true, false]
+      use_yearly: [true, false]
+      weekly_harmonics: {low: 0, high: 2}
+      use_weekend: [true, false]
 
   greykite:
     grid:
@@ -62,8 +73,16 @@ models:
 
   chronos:
     grid:
-      context_length: [128, 512, 2048]
-      use_weather: [true, false]
+      - context_length: [128, 512, 2048]
+        use_weather: [true, false]
+      - context_length: [128, 512, 2048]
+        use_weather: [true, false]
+        use_yearly: true
+        weekly_harmonics: [1, 2]
+        use_weekend: true
     search_space:
       context_length: {low: 64, high: 2048, step: 64}
       use_weather: [true, false]
+      use_yearly: [true, false]
+      weekly_harmonics: {low: 0, high: 2}
+      use_weekend: [true, false]
