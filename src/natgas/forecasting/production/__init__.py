@@ -9,6 +9,7 @@ from natgas.forecasting.production.GridSearchRuns import GridSearchRuns
 from natgas.forecasting.production.PredictionStore import PredictionStore
 from natgas.forecasting.production.ProductionScorer import ProductionScorer
 from natgas.forecasting.production.RegisteredModelLoader import RegisteredModelLoader
+from natgas.forecasting.production.ScoringFlow import ScoringFlow
 from natgas.forecasting.production.ScoringPipeline import ScoringPipeline
 from natgas.forecasting.production.ScoringRun import ScoringRun
 
@@ -22,6 +23,7 @@ __all__ = [
     "PredictionStore",
     "ProductionScorer",
     "RegisteredModelLoader",
+    "ScoringFlow",
     "ScoringPipeline",
     "ScoringRun",
 ]

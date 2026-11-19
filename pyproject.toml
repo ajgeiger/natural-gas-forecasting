@@ -14,9 +14,13 @@ authors = [{ name = "Alex Geiger" }]
 # Chronos-2 (chronos-forecasting 2.x) declares pandas 2, which conflicts with
 # that pin. The forecast API we use works with pandas 1.5, so install it in a
 # second step: pip install "chronos-forecasting>=2.0" --no-deps
+# Prefect 3.8 allows FastAPI below 1.0, but its server breaks on newer FastAPI: from 0.151
+# filter requests with empty limit or sort get 422, and from 0.155 the server fails to
+# import (Body no longer takes min_items). So FastAPI is capped below 0.151.
 dependencies = [
     "accelerate>=1.1,<2",
     "einops>=0.7",
+    "fastapi>=0.139,<0.151",
     "greykite==1.1.0",
     "holidays>=0.13",
     "joblib>=1.3",
@@ -24,6 +28,7 @@ dependencies = [
     "numpy>=1.24",
     "optuna>=3.6",
     "pandas>=1.5",
+    "prefect>=3,<4",
     "pyyaml>=6.0",
     "requests>=2.31",
     "scikit-learn>=1.3",

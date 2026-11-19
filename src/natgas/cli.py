@@ -1,4 +1,5 @@
-"""Command line entry point: natgas init-db, ingest, tune, score, export-backtests, spark-show."""
+"""Command line entry point: natgas init-db, ingest, tune, score, flow, serve, export-backtests,
+spark-show."""
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from natgas.forecasting.production import (
     BacktestExporter,
     ChallengerPublisher,
     GridSearchRuns,
+    ScoringFlow,
     ScoringPipeline,
 )
 from natgas.forecasting.tuning import TuningConfig, TuningPipeline
@@ -51,6 +53,8 @@ def main(verbose: bool = typer.Option(False, "--verbose", "-v")) -> None:
     )
     # urllib3 debug lines include full query strings, which can hold the EIA key
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    # Prefect logs every API call through httpx
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @app.command("init-db")
@@ -188,6 +192,33 @@ def score_command(
     typer.echo(f"predictions saved: {run.saved}")
     typer.echo(f"future weather days: {run.weather_days}")
     typer.echo(f"matured forecasts in forecast_actuals: {run.actuals}")
+
+
+@app.command("flow")
+def flow_command(
+    config: str = TuningOption,
+    refresh: bool = typer.Option(True, help="Load the newest data first."),
+) -> None:
+    """Run the scoring job once as a Prefect flow, tracked in the Prefect UI. Safe to rerun."""
+    summary = ScoringFlow(config).run_once(refresh=refresh)
+    typer.echo(f"run {summary['run_id']} as of {summary['as_of_date']}")
+    typer.echo(f"loaded: {summary['loaded']}")
+    typer.echo(f"predictions saved: {summary['saved']}")
+    typer.echo(f"future weather days: {summary['weather_days']}")
+    typer.echo(f"matured forecasts in forecast_actuals: {summary['actuals']}")
+
+
+@app.command("serve")
+def serve_command(
+    config: str = TuningOption,
+    cron: str = typer.Option("0 7 * * 2-6", help="Cron schedule. Default Tuesday to Saturday."),
+    timezone: str = typer.Option("America/New_York", help="Timezone of the cron schedule."),
+) -> None:
+    """Serve the scheduled natgas-daily-scoring deployment until stopped with Ctrl+C.
+
+    Run from the repo root with a Prefect server up and PREFECT_API_URL pointing at it.
+    """
+    ScoringFlow(config).serve(cron=cron, timezone=timezone)
 
 
 @app.command("spark-show")

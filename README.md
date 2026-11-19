@@ -188,7 +188,7 @@ On an 8 core CPU the grid notebook takes about 25 minutes and the Bayesian noteb
 
 ## Production scoring
 
-`natgas score` (or `make score`) is the daily job. It runs once by hand today; no schedule is set up yet.
+`natgas score` (or `make score`) is the daily job. Run it by hand, from cron with `scripts/run_scoring.sh`, or as a Prefect flow (see Prefect below).
 
 1. `DataRefresher` reloads the last 30 days of prices, weather, and storage with the same loaders as `natgas ingest`, so late corrections replace earlier values.
 2. The as-of date is the latest trading day before today. Today's bar is still trading, so it is never used.
@@ -207,6 +207,30 @@ natgas export-backtests      # backtest_forecasts table and outputs/backtest_for
 natgas score                 # refresh, score, backfill actuals, update the views
 natgas score --no-refresh    # score from the data already loaded
 ```
+
+### Prefect
+
+`ScoringFlow` runs the same job as a Prefect 3 flow, `natgas-daily-scoring`, with one task per stage: `refresh_data` (retries twice, 30 seconds apart, for network hiccups at Yahoo, Open-Meteo, or EIA), `score_models`, and `backfill_actuals`. The tasks call `ScoringPipeline`'s stage methods, so `natgas score` and `natgas flow` write the same rows and reruns stay safe. The open-source Prefect server shows run history, each task's state and logs, failures with tracebacks, and the schedule at http://127.0.0.1:4200.
+
+Run from the repo root. Start the server in one terminal and leave it open:
+
+```bash
+prefect server start          # UI at http://127.0.0.1:4200, data in ~/.prefect
+```
+
+In a second terminal, point the client at it, then run once or serve the schedule:
+
+```bash
+prefect config set PREFECT_API_URL=http://127.0.0.1:4200/api   # once per machine
+natgas flow --no-refresh      # one tracked run from the data already loaded
+natgas flow                   # one tracked run with a data refresh
+natgas serve                  # deployment natgas-daily-scoring, 07:00 Tuesday to Saturday America/New_York
+prefect deployment run natgas-daily-scoring/natgas-daily-scoring   # trigger the served deployment now
+```
+
+`natgas serve` keeps running and starts each scheduled run itself, at most one at a time; stopping it with Ctrl+C pauses the schedule until the next `natgas serve`. Both the server and `natgas serve` must be running at 07:00, so on Windows start them at logon with Task Scheduler. Without `PREFECT_API_URL`, `natgas flow` starts a temporary server for that run only, and nothing is kept for the UI. The same commands work in PowerShell; use `.venv\Scripts\natgas.exe` if the virtual environment is not activated.
+
+Prefect 3.8 breaks on FastAPI 0.151 and later, so `pyproject.toml` caps FastAPI below 0.151.
 
 `export-backtests` takes the best config per model from the latest 30 day grid search in MLflow and writes the forecasts that search logged. Chronos-2 is backtested again on the same as-of dates only to add its interval, and as-of dates where the rerun does not match the logged forecast (for example after the weather archive revised recent days) get no interval.
 
@@ -277,7 +301,7 @@ flowchart LR
     db --> dashboard[dashboard]
 ```
 
-Ingestion, backtesting, MLflow tracking, the model registry, and the daily scoring job exist today. The dashboard is planned, and the scoring job is not on a schedule yet.
+Ingestion, backtesting, MLflow tracking, the model registry, and the daily scoring job exist today. The dashboard is planned. The scoring job can run on a schedule with cron or Prefect.
 
 ## Layout
 

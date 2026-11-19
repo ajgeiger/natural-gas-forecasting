@@ -26,6 +26,17 @@ tune:
 score:
 	natgas score
 
+# Same job as a Prefect flow, tracked in the Prefect UI
+flow:
+	natgas flow
+
+prefect-server:
+	prefect server start
+
+# Scheduled deployment natgas-daily-scoring, needs prefect-server running
+serve:
+	natgas serve
+
 export-backtests:
 	natgas export-backtests
 
@@ -35,4 +46,4 @@ register-challenger:
 spark-show:
 	natgas spark-show prices
 
-.PHONY: install lint format test init-db ingest tune score export-backtests register-challenger spark-show
+.PHONY: install lint format test init-db ingest tune score flow prefect-server serve export-backtests register-challenger spark-show
