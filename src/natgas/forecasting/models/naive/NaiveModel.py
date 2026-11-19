@@ -6,21 +6,21 @@ from pathlib import Path
 
 import pandas as pd
 
-from natgas.forecasting.models.AbstractModelWrapper import AbstractModelWrapper
+from natgas.forecasting.models.base.AbstractModelWrapper import AbstractModelWrapper
+from natgas.forecasting.models.naive.NaiveModelConfig import NaiveModelConfig
 
 
 class NaiveModel(AbstractModelWrapper):
     """Predicts the last observed price for every future date.
 
     For a traded price this is a hard baseline to beat over a few days, so
-    every other model should be compared against it.
+    every other model has to beat it before it gets published.
     """
 
-    name = "naive"
-    default_hyperparameters: dict = {}
+    config_class = NaiveModelConfig
 
-    def __init__(self, hyperparameters: dict | None = None) -> None:
-        super().__init__(hyperparameters)
+    def __init__(self, config: NaiveModelConfig | None = None) -> None:
+        super().__init__(config)
         self.last_price: float | None = None
 
     def train(self, training_data: pd.DataFrame) -> None:
@@ -37,8 +37,7 @@ class NaiveModel(AbstractModelWrapper):
 
     @classmethod
     def load(cls, folder: str | Path) -> NaiveModel:
-        settings = cls.read_settings(folder)
-        model = cls(settings["hyperparameters"])
-        model.last_price = settings["last_price"]
+        model = cls(cls.config_from_folder(folder))
+        model.last_price = cls.read_settings(folder)["last_price"]
         model.is_trained = True
         return model

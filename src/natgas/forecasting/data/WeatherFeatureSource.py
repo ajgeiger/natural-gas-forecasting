@@ -6,6 +6,7 @@ import pandas as pd
 from sqlalchemy import Engine, text
 
 from natgas.forecasting.data.AbstractFeatureSource import AbstractFeatureSource
+from natgas.forecasting.data.SqlReader import SqlReader
 
 COLUMNS = ["hdd", "cdd"]
 
@@ -32,7 +33,8 @@ class WeatherFeatureSource(AbstractFeatureSource):
         cls, engine: Engine, use_observed_as_forecast: bool = True
     ) -> WeatherFeatureSource:
         query = text("SELECT date, location, hdd, cdd FROM weather_daily")
-        return cls(pd.read_sql(query, engine), use_observed_as_forecast)
+        frame = SqlReader.read(engine, query, ["date", "location", "hdd", "cdd"])
+        return cls(frame, use_observed_as_forecast)
 
     @property
     def columns(self) -> list[str]:

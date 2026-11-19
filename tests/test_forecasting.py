@@ -1,4 +1,4 @@
-"""Tests for the data provider, models, backtester, and tuning pipeline. No network."""
+"""Tests for the data provider, models, backtester, optimizers, and publisher. No network."""
 
 from pathlib import Path
 
@@ -6,9 +6,10 @@ import mlflow
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 from mlflow import MlflowClient
 
-from natgas.forecasting.backtesting import Backtester, ForecastMetrics
+from natgas.forecasting.backtesting import Backtester, BacktestReport, ForecastMetrics
 from natgas.forecasting.data import (
     AbstractFeatureSource,
     ForecastDataProvider,
@@ -16,12 +17,43 @@ from natgas.forecasting.data import (
     WeatherFeatureSource,
 )
 from natgas.forecasting.models import (
+    AbstractConfigWrapper,
     AbstractModelWrapper,
-    GradientBoostingModel,
+    ChronosModel,
+    ChronosModelConfig,
+    GradientBoostingModelConfig,
+    GreykiteModel,
+    GreykiteModelConfig,
     ModelCatalog,
     NaiveModel,
+    NaiveModelConfig,
 )
-from natgas.forecasting.tuning import HyperparameterGrid, TuningConfig, TuningPipeline
+from natgas.forecasting.optimization import (
+    BayesianOptimizer,
+    GridSearchOptimizer,
+    HyperparameterGrid,
+    OptimizerCatalog,
+)
+from natgas.forecasting.tuning import ModelPublisher, TuningConfig, TuningPipeline
+
+
+class FakeChronosPipeline:
+    """Stands in for a downloaded Chronos model: predicts the last value plus a step."""
+
+    def predict_quantiles(self, context, prediction_length, quantile_levels):
+        last = float(context[-1])
+        path = torch.tensor([last + 0.01 * (k + 1) for k in range(prediction_length)])
+        quantiles = path.reshape(1, prediction_length, 1).repeat(1, 1, len(quantile_levels))
+        return quantiles, path.reshape(1, prediction_length)
+
+
+@pytest.fixture(autouse=True)
+def fake_chronos(monkeypatch: pytest.MonkeyPatch) -> None:
+    pipelines = {
+        f"{model_id}@cpu": FakeChronosPipeline()
+        for model_id in ChronosModelConfig.default_grid()["model_id"]
+    }
+    monkeypatch.setattr(ChronosModel, "pipelines", pipelines)
 
 
 @pytest.fixture
@@ -42,10 +74,10 @@ def provider() -> ForecastDataProvider:
 
 
 def test_abstract_classes_cannot_be_created() -> None:
-    with pytest.raises(TypeError):
-        AbstractModelWrapper()
-    with pytest.raises(TypeError):
-        AbstractFeatureSource()
+    abstract_classes = (AbstractModelWrapper, AbstractConfigWrapper, AbstractFeatureSource)
+    for abstract_class in abstract_classes:
+        with pytest.raises(TypeError):
+            abstract_class()
 
 
 def test_window_has_no_training_rows_after_as_of(provider: ForecastDataProvider) -> None:
@@ -93,12 +125,48 @@ def test_grid_expands_every_combination() -> None:
     assert {"a": 2, "b": False, "c": 5} in configs
 
 
-@pytest.mark.parametrize("model_class", [NaiveModel, GradientBoostingModel])
+def test_configs_validate_and_round_trip() -> None:
+    config = GradientBoostingModelConfig(max_depth=4, use_weather=False)
+    assert GradientBoostingModelConfig.from_dict(config.to_dict()) == config
+    assert config.required_features == []
+    assert GreykiteModelConfig().required_features == ["hdd", "cdd"]
+    assert ChronosModelConfig().max_horizon_days == 64
+    with pytest.raises(ValueError):
+        GradientBoostingModelConfig.from_dict({"not_a_setting": 1})
+    with pytest.raises(ValueError):
+        ChronosModelConfig(model_id="amazon/chronos-t5-small", context_length=1024)
+    with pytest.raises(ValueError):
+        GreykiteModelConfig(fit_algorithm="lasso")
+
+
+def test_catalog_pairs_every_model_with_its_config() -> None:
+    for name in ModelCatalog.names():
+        model_class, config_class = ModelCatalog.entry(name)
+        assert model_class.config_class is config_class
+        assert config_class.model_name == name
+        for values in HyperparameterGrid(config_class.default_grid()).configs():
+            config_class.from_dict(values)
+
+
+def test_model_rejects_wrong_config_type() -> None:
+    with pytest.raises(TypeError):
+        NaiveModel(GradientBoostingModelConfig())
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        NaiveModelConfig(),
+        GradientBoostingModelConfig(max_iter=20),
+        GreykiteModelConfig(history_years=0),
+        ChronosModelConfig(context_length=64),
+    ],
+)
 def test_models_train_predict_save_load(
-    model_class: type[AbstractModelWrapper], provider: ForecastDataProvider, tmp_path: Path
+    config: AbstractConfigWrapper, provider: ForecastDataProvider, tmp_path: Path
 ) -> None:
     window = provider.window(provider.last_date - pd.Timedelta(days=30))
-    model = model_class()
+    model = ModelCatalog.build(config)
     model.train(window.training_data)
     prediction = model.predict(window.future_features)
     assert prediction.index.equals(window.forecast_dates)
@@ -106,50 +174,102 @@ def test_models_train_predict_save_load(
 
     model.save(tmp_path / "model")
     loaded = ModelCatalog.load(tmp_path / "model")
-    assert type(loaded) is model_class
+    assert type(loaded) is type(model)
+    assert loaded.config == config
     pd.testing.assert_series_equal(loaded.predict(window.future_features), prediction)
 
 
-def test_unknown_hyperparameter_is_rejected() -> None:
-    with pytest.raises(ValueError):
-        GradientBoostingModel({"not_a_setting": 1})
+def test_greykite_uses_weather_regressors(provider: ForecastDataProvider) -> None:
+    window = provider.window(provider.last_date - pd.Timedelta(days=30))
+    model = GreykiteModel(GreykiteModelConfig(autoregression_lags=0))
+    model.train(window.training_data)
+    assert list(model.history.columns) == ["price", "hdd", "cdd"]
 
 
 def test_backtester_records_each_as_of(provider: ForecastDataProvider) -> None:
     dates = provider.backtest_dates("2022-09-01", step_days=30)
-    report = Backtester(provider, dates).run(NaiveModel)
+    report = Backtester(provider, dates).run(NaiveModelConfig())
     assert [result.as_of for result in report.results] == dates
     assert all(result.last_training_date <= result.as_of for result in report.results)
     assert len(report.forecasts()) == 5 * len(dates)
     assert set(report.metrics()) == set(ForecastMetrics.names)
 
 
-def test_pipeline_logs_runs_and_registers_best_model(
-    provider: ForecastDataProvider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.chdir(tmp_path)
+def test_backtester_checks_config_against_provider(provider: ForecastDataProvider) -> None:
+    no_weather = ForecastDataProvider(provider.target, [], horizon_days=5)
+    backtester = Backtester(no_weather, no_weather.backtest_dates("2022-09-01", step_days=30))
+    with pytest.raises(ValueError):
+        backtester.run(GradientBoostingModelConfig(use_weather=True))
+
+
+def test_publisher_keeps_naive_unless_margin_is_cleared(provider: ForecastDataProvider) -> None:
+    dates = provider.backtest_dates("2023-01-01", step_days=30)
+    backtester = Backtester(provider, dates)
+    naive = backtester.run(NaiveModelConfig())
+    chronos = backtester.run(ChronosModelConfig(context_length=64))
+    reports: list[BacktestReport] = [naive, chronos]
+    improvement = 1 - min(r.metrics()["mae"] for r in reports) / naive.metrics()["mae"]
+
+    strict = ModelPublisher(provider, "x", min_improvement=improvement + 0.5)
+    assert strict.choose(reports).report.model_name == "naive"
+    if improvement > 0:
+        loose = ModelPublisher(provider, "x", min_improvement=0.0)
+        assert loose.choose(reports).report.model_name == "chronos"
+
+
+def run_pipeline(provider: ForecastDataProvider, tmp_path: Path, optimizer: str):
     config = TuningConfig(
-        model_grids={"naive": {}, "gradient_boosting": {"max_depth": [2, 3], "max_iter": [20]}},
+        model_settings={
+            "naive": {},
+            "gradient_boosting": {
+                "grid": {"max_depth": [2, 3], "max_iter": [20]},
+                "search_space": {"max_depth": {"low": 2, "high": 4}, "max_iter": [20]},
+            },
+            "chronos": {"grid": {"context_length": [64]}, "search_space": {"context_length": [64]}},
+        },
+        optimizer=optimizer,
+        n_trials=2,
         backtest_start=pd.Timestamp("2023-01-01"),
         step_days=30,
+        min_improvement=10.0,
         tracking_uri=f"sqlite:///{tmp_path / 'mlflow.db'}",
-        experiment_name="test-backtests",
-        registered_model_name="test-forecaster",
+        experiment_name=f"test-{optimizer}",
+        registered_model_name=f"test-{optimizer}-forecaster",
     )
-    outcome = TuningPipeline(config, provider).run()
+    return TuningPipeline(config, provider).run()
 
-    assert len(outcome.summary) == 3
+
+@pytest.mark.parametrize("optimizer", ["grid", "bayesian"])
+def test_pipeline_logs_runs_and_publishes(
+    optimizer: str, provider: ForecastDataProvider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    outcome = run_pipeline(provider, tmp_path, optimizer)
+
     assert outcome.summary["mae"].is_monotonic_increasing
+    assert set(outcome.summary["model_name"]) == {"naive", "gradient_boosting", "chronos"}
+    assert (outcome.summary["method"] == optimizer).all()
+    # An impossible margin means naive is always published
+    assert outcome.decision.report.model_name == "naive"
     assert outcome.registered_version == "1"
 
-    experiment = mlflow.get_experiment_by_name("test-backtests")
+    experiment = mlflow.get_experiment_by_name(f"test-{optimizer}")
     runs = mlflow.search_runs([experiment.experiment_id])
-    # One search run, three config runs, one publish run
-    assert len(runs) == 5
+    # One search run, one run per config, one publish run
+    assert len(runs) == len(outcome.summary) + 2
 
-    client = MlflowClient()
-    version = client.get_model_version_by_alias("test-forecaster", "champion")
+    name = f"test-{optimizer}-forecaster"
+    version = MlflowClient().get_model_version_by_alias(name, "champion")
     assert str(version.version) == "1"
-    model = mlflow.pyfunc.load_model("models:/test-forecaster@champion")
+    model = mlflow.pyfunc.load_model(f"models:/{name}@champion")
     future = provider.window(provider.last_date).future_features.reset_index(names="date")
     assert len(model.predict(future)) == 5
+
+
+def test_optimizers_report_their_method(provider: ForecastDataProvider) -> None:
+    backtester = Backtester(provider, provider.backtest_dates("2023-01-01", step_days=60))
+    assert GridSearchOptimizer(backtester).method_name == "grid"
+    assert isinstance(OptimizerCatalog.build("bayesian", backtester), BayesianOptimizer)
+    with pytest.raises(KeyError):
+        OptimizerCatalog.build("random", backtester)
+    assert BayesianOptimizer(backtester, n_trials=3).trial_count({"a": [1, 2]}) == 2

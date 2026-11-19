@@ -9,6 +9,7 @@ from natgas.config import Settings
 from natgas.db import get_engine
 from natgas.forecasting.data.AbstractFeatureSource import AbstractFeatureSource
 from natgas.forecasting.data.ForecastWindow import ForecastWindow
+from natgas.forecasting.data.SqlReader import SqlReader
 from natgas.forecasting.data.StorageFeatureSource import StorageFeatureSource
 from natgas.forecasting.data.WeatherFeatureSource import WeatherFeatureSource
 
@@ -51,7 +52,8 @@ class ForecastDataProvider:
             raise ValueError(f"target_column must be one of {PRICE_COLUMNS}")
         engine = get_engine(settings.db_url)
         query = text(f"SELECT date, {target_column} AS value FROM prices ORDER BY date")
-        prices = pd.read_sql(query, engine, parse_dates=["date"])
+        prices = SqlReader.read(engine, query, ["date", "value"])
+        prices["date"] = pd.to_datetime(prices["date"])
         target = prices.set_index("date")["value"]
 
         sources: list[AbstractFeatureSource] = [WeatherFeatureSource.from_database(engine)]

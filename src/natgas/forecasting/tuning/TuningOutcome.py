@@ -6,15 +6,17 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from natgas.forecasting.backtesting.BacktestReport import BacktestReport
+from natgas.forecasting.tuning.PublishDecision import PublishDecision
+
 
 @dataclass(frozen=True)
 class TuningOutcome:
-    """Summary table, the winning config and its scores, and the registered version."""
+    """Results table, the best config per model, the publish decision, and the version."""
 
     summary: pd.DataFrame
-    best_model_name: str
-    best_hyperparameters: dict
-    best_metrics: dict
+    best_by_model: dict[str, BacktestReport]
+    decision: PublishDecision
     registered_model_name: str
     registered_version: str | None
     parent_run_id: str

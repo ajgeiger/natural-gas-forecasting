@@ -9,7 +9,10 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 
-from natgas.forecasting.models.AbstractModelWrapper import AbstractModelWrapper
+from natgas.forecasting.models.base.AbstractModelWrapper import AbstractModelWrapper
+from natgas.forecasting.models.gradient_boosting.GradientBoostingModelConfig import (
+    GradientBoostingModelConfig,
+)
 
 REGRESSOR_FILE = "regressor.joblib"
 HISTORY_FILE = "recent_prices.csv"
@@ -25,64 +28,43 @@ class GradientBoostingModel(AbstractModelWrapper):
     next day.
     """
 
-    name = "gradient_boosting"
-    default_hyperparameters: dict = {
-        "n_lags": 10,
-        "learning_rate": 0.05,
-        "max_depth": 3,
-        "max_iter": 200,
-        "min_samples_leaf": 20,
-        "l2_regularization": 0.0,
-        "use_weather": True,
-        "weather_columns": ["hdd", "cdd"],
-        "random_state": 42,
-    }
+    config_class = GradientBoostingModelConfig
 
-    def __init__(self, hyperparameters: dict | None = None) -> None:
-        super().__init__(hyperparameters)
+    def __init__(self, config: GradientBoostingModelConfig | None = None) -> None:
+        super().__init__(config)
         self.regressor: HistGradientBoostingRegressor | None = None
         self.recent_prices: pd.Series | None = None
 
-    @property
-    def weather_columns(self) -> list[str]:
-        return list(self.hyperparameters["weather_columns"]) if self.use_weather else []
-
-    @property
-    def use_weather(self) -> bool:
-        return bool(self.hyperparameters["use_weather"])
-
     def build_features(self, changes: pd.Series, weather: pd.DataFrame) -> pd.DataFrame:
         """Lagged changes for each date, plus that date's weather if enabled."""
-        lags = {f"change_lag_{k}": changes.shift(k) for k in range(1, self.n_lags + 1)}
+        n_lags = self.config.n_lags
+        lags = {f"change_lag_{k}": changes.shift(k) for k in range(1, n_lags + 1)}
         features = pd.DataFrame(lags, index=changes.index)
-        for column in self.weather_columns:
+        for column in self.config.required_features:
             features[column] = weather.get(column, np.nan)
         return features
 
-    @property
-    def n_lags(self) -> int:
-        return int(self.hyperparameters["n_lags"])
-
     def train(self, training_data: pd.DataFrame) -> None:
+        n_lags = self.config.n_lags
         prices = training_data["price"].dropna()
         changes = prices.diff()
         features = self.build_features(changes, training_data.reindex(prices.index))
-        rows = features.iloc[self.n_lags + 1 :]
-        target = changes.iloc[self.n_lags + 1 :]
-        if len(rows) < 2 * self.n_lags:
+        rows = features.iloc[n_lags + 1 :]
+        target = changes.iloc[n_lags + 1 :]
+        if len(rows) < 2 * n_lags:
             raise ValueError("Not enough history to train gradient_boosting")
 
         self.regressor = HistGradientBoostingRegressor(
-            learning_rate=self.hyperparameters["learning_rate"],
-            max_depth=self.hyperparameters["max_depth"],
-            max_iter=self.hyperparameters["max_iter"],
-            min_samples_leaf=self.hyperparameters["min_samples_leaf"],
-            l2_regularization=self.hyperparameters["l2_regularization"],
-            random_state=self.hyperparameters["random_state"],
+            learning_rate=self.config.learning_rate,
+            max_depth=self.config.max_depth,
+            max_iter=self.config.max_iter,
+            min_samples_leaf=self.config.min_samples_leaf,
+            l2_regularization=self.config.l2_regularization,
+            random_state=self.config.random_state,
         )
         self.regressor.fit(rows, target)
         # Keep just enough history to build lags for the first forecast day
-        self.recent_prices = prices.iloc[-(self.n_lags + 1) :]
+        self.recent_prices = prices.iloc[-(n_lags + 1) :]
         self.is_trained = True
 
     def predict(self, future_features: pd.DataFrame) -> pd.Series:
@@ -93,8 +75,8 @@ class GradientBoostingModel(AbstractModelWrapper):
 
         for day in future_features.index:
             # Most recent change first, to match change_lag_1, change_lag_2, ...
-            row = {f"change_lag_{k}": changes[-k] for k in range(1, self.n_lags + 1)}
-            for column in self.weather_columns:
+            row = {f"change_lag_{k}": changes[-k] for k in range(1, self.config.n_lags + 1)}
+            for column in self.config.required_features:
                 value = future_features.at[day, column] if column in future_features else np.nan
                 row[column] = value
             change = float(self.regressor.predict(pd.DataFrame([row]))[0])
@@ -113,7 +95,7 @@ class GradientBoostingModel(AbstractModelWrapper):
     @classmethod
     def load(cls, folder: str | Path) -> GradientBoostingModel:
         folder = Path(folder)
-        model = cls(cls.read_settings(folder)["hyperparameters"])
+        model = cls(cls.config_from_folder(folder))
         model.regressor = joblib.load(folder / REGRESSOR_FILE)
         history = pd.read_csv(folder / HISTORY_FILE, parse_dates=["date"], index_col="date")
         model.recent_prices = history["price"]

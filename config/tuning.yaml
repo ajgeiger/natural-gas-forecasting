@@ -1,28 +1,68 @@
-# Hyperparameter search and backtest settings for `natgas tune`.
-# Every list under a model is a set of options. Every combination is backtested.
+# Settings for `natgas tune` and the experiment notebooks.
+# Each model maps to its config class in src/natgas/forecasting/models.
+# "grid" is used by grid search, "search_space" by Bayesian search.
+# Leave either out to use the config class defaults.
 
 target_column: high        # column in the prices table to forecast
-selection_metric: mae      # mae, rmse, mape, or wape. Lowest wins.
 
 backtest:
   horizon_days: 5          # trading days to forecast from each as-of date
   start: "2022-01-01"      # first as-of date
   end:                     # last as-of date, blank means the latest data
   step_days: 14            # calendar days between as-of dates
+  n_jobs: 6                # as-of dates run in parallel
+
+search:
+  optimizer: grid          # grid or bayesian
+  n_trials: 6              # Bayesian trials per model
+  seed: 42
+  selection_metric: mae    # mae, rmse, mape, or wape. Lowest wins.
+
+publish:
+  # The best model must beat naive by this share of error, else naive is published
+  min_improvement: 0.01
+  registered_model_name: natgas-price-forecaster
+  alias: champion
 
 mlflow:
   # A database backend is needed for the model registry.
   # Run artifacts go to ./mlruns next to it.
   tracking_uri: sqlite:///mlflow.db
   experiment_name: natgas-backtests
-  registered_model_name: natgas-price-forecaster
-  model_alias: champion
 
 models:
   naive: {}
+
   gradient_boosting:
-    n_lags: [5, 10]
-    learning_rate: [0.03, 0.1]
-    max_depth: [2, 4]
-    max_iter: [200]
-    use_weather: [true, false]
+    grid:
+      n_lags: [5, 10]
+      learning_rate: [0.03, 0.1]
+      max_depth: [2, 4]
+      use_weather: [true, false]
+    search_space:
+      n_lags: {low: 3, high: 20}
+      learning_rate: {low: 0.01, high: 0.3, log: true}
+      max_depth: {low: 2, high: 6}
+      min_samples_leaf: {low: 10, high: 100, log: true}
+      use_weather: [true, false]
+
+  greykite:
+    grid:
+      history_years: [2.0, 4.0]
+      autoregression_lags: [0, 3]
+      use_weather: [true, false]
+    search_space:
+      history_years: {low: 2.0, high: 8.0}
+      autoregression_lags: {low: 0, high: 5}
+      use_weather: [true, false]
+      auto_changepoints: [true, false]
+      fit_algorithm: [ridge, linear]
+
+  chronos:
+    grid:
+      model_id: [amazon/chronos-bolt-small, amazon/chronos-bolt-base, amazon/chronos-t5-small]
+      context_length: [128, 512]
+    search_space:
+      model_id: [amazon/chronos-bolt-small, amazon/chronos-bolt-base, amazon/chronos-t5-small]
+      context_length: {low: 64, high: 512, step: 64}
+      point_forecast: [median, mean]

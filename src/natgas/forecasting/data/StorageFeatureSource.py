@@ -6,6 +6,7 @@ import pandas as pd
 from sqlalchemy import Engine, text
 
 from natgas.forecasting.data.AbstractFeatureSource import AbstractFeatureSource
+from natgas.forecasting.data.SqlReader import SqlReader
 
 COLUMN = "storage_bcf"
 
@@ -31,7 +32,8 @@ class StorageFeatureSource(AbstractFeatureSource):
     @classmethod
     def from_database(cls, engine: Engine, region: str) -> StorageFeatureSource:
         query = text("SELECT week_ending, value_bcf FROM storage_weekly WHERE region = :region")
-        return cls(pd.read_sql(query, engine, params={"region": region}))
+        columns = ["week_ending", "value_bcf"]
+        return cls(SqlReader.read(engine, query, columns, {"region": region}))
 
     @property
     def has_data(self) -> bool:

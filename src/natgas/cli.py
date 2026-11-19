@@ -98,18 +98,20 @@ def ingest_all_command(start: str = StartOption, end: str = EndOption) -> None:
 @app.command("tune")
 def tune_command(
     config: str = typer.Option("config/tuning.yaml", help="Tuning config file."),
-    publish: bool = typer.Option(True, help="Register the best model in MLflow."),
+    optimizer: str = typer.Option(None, help="grid or bayesian. Overrides the config."),
+    publish: bool = typer.Option(True, help="Register the chosen model in MLflow."),
 ) -> None:
-    """Backtest every config, log to MLflow, and publish the best model."""
-    settings = load_settings()
-    pipeline = TuningPipeline.from_settings(TuningConfig.from_yaml(config), settings)
-    outcome = pipeline.run(publish=publish)
+    """Search configs with backtests, log to MLflow, and publish the winner."""
+    tuning = TuningConfig.from_yaml(config)
+    if optimizer:
+        tuning = tuning.with_values(optimizer=optimizer)
+    outcome = TuningPipeline.from_settings(tuning, load_settings()).run(publish=publish)
 
-    columns = ["model_name", "hyperparameters", "mae", "rmse", "mape", "wape", "bias"]
+    columns = ["model_name", "config", "mae", "rmse", "mape", "wape", "bias"]
     if "skill_vs_naive" in outcome.summary:
         columns.append("skill_vs_naive")
-    typer.echo(outcome.summary[columns].head(10).to_string(index=False))
-    typer.echo(f"best: {outcome.best_model_name} {outcome.best_hyperparameters}")
+    typer.echo(outcome.summary[columns].head(15).to_string(index=False))
+    typer.echo(f"decision: {outcome.decision.reason}")
     if outcome.registered_version:
         typer.echo(
             f"registered {outcome.registered_model_name} version {outcome.registered_version}"
