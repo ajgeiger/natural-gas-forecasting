@@ -63,7 +63,5 @@ models:
   chronos:
     grid:
       context_length: [128, 512, 2048]
-      use_weather: [true, false]
     search_space:
       context_length: {low: 64, high: 2048, step: 64}
-      use_weather: [true, false]

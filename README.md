@@ -14,30 +14,30 @@ Most forecasting demos stop at one model on one train and test split. This proje
 
 Prices from 2015-01-02 to 2026-11-18. 127 as-of dates every 14 days from 2021-12-31 to 2026-10-30, each forecasting the next 5 trading days. Same dates for every model. Best config per model, MAE, RMSE, and bias in dollars per MMBtu, MAPE and WAPE in percent.
 
-Grid search (39 configs):
+Grid search (36 configs):
 
 | Model | MAE | RMSE | MAPE | WAPE | Bias | Best config |
 | --- | --- | --- | --- | --- | --- | --- |
 | Gradient boosting | 0.2462 | 0.3885 | 6.19 | 6.49 | -0.0011 | 5 lags, depth 2, learning rate 0.03, no weather |
 | Naive | 0.2462 | 0.3828 | 6.16 | 6.49 | 0.0001 | none |
-| Chronos-2 | 0.2482 | 0.3874 | 6.18 | 6.54 | -0.0098 | context 512, no weather |
+| Chronos-2 | 0.2482 | 0.3874 | 6.18 | 6.54 | -0.0098 | context 512 |
 | Greykite | 0.3035 | 0.4504 | 7.89 | 8.00 | 0.0146 | 4 years of history, 3 price lags, holiday dummies off |
 
-Bayesian search (19 configs, 6 trials per model):
+Bayesian search (18 configs, up to 6 trials per model):
 
 | Model | MAE | RMSE | MAPE | WAPE | Bias | Best config |
 | --- | --- | --- | --- | --- | --- | --- |
 | Naive | 0.2462 | 0.3828 | 6.16 | 6.49 | 0.0001 | none |
+| Chronos-2 | 0.2473 | 0.3805 | 6.22 | 6.51 | -0.0104 | context 320 |
 | Gradient boosting | 0.2481 | 0.3893 | 6.21 | 6.53 | -0.0049 | 13 lags, depth 2, learning rate 0.018, min leaf 89, weather |
-| Chronos-2 | 0.2490 | 0.3903 | 6.23 | 6.56 | -0.0145 | context 1472, no weather |
 | Greykite | 0.3089 | 0.4490 | 8.05 | 8.14 | 0.0063 | 6.9 years, 1 price lag, ridge, holiday dummies off |
 
-Nothing beat naive by the 1 percent margin, so the publisher kept naive and registered it as `natgas-price-forecaster` version 4 (`@champion`). That is the expected result for a liquid futures price over a few days, and it is why the publishing rule exists.
+Nothing beat naive by the 1 percent margin, so the publisher kept naive and registered it as `natgas-price-forecaster` version 5 (`@champion`). That is the expected result for a liquid futures price over a few days, and it is why the publishing rule exists.
 
 What the numbers say:
 
-- Chronos-2 lands within 1 percent of naive in grid search (MAE 0.2482 against 0.2462) with no training at all.
-- Weather as a known future covariate did not help Chronos-2 at this horizon. The best Chronos-2 configs in both searches leave it off. Backtests use observed weather as a perfect forecast, so live results with real weather forecasts would not be better.
+- Chronos-2 comes within half a percent of naive with no training at all (MAE 0.2473 against 0.2462 at context 320), and has the lowest RMSE of any model (0.3805 against 0.3828), so it misses less badly on big moves.
+- Degree days as known future covariates never helped Chronos-2 in earlier runs and roughly tripled its runtime, so it reads the price history alone.
 - US holiday dummies with 1 to 4 days before and after did not help Greykite. The best configs with them were MAE 0.3047 in grid search (4 years, 3 lags, window 2) and 0.3166 in Bayesian search (7.2 years, 3 lags, window 4, changepoints). With the dummies off, Greykite falls back to its own built-in holiday events.
 - Silverkite is built for series with strong trend and seasonality, which day to day futures prices do not have.
 
@@ -72,12 +72,20 @@ def check_no_leakage(
         raise AssertionError(f"Forecast dates must start after {as_of.date()}")
 ```
 
-`ChronosModel` runs Amazon Chronos-2 zero-shot. The context is prices up to the as-of date, and degree days for the forecast dates go in as known future covariates:
+`HolidayFeatureSource` turns the `holidays` calendar into dummies for each holiday and the days around it, such as `labor_day_pre_2` and `labor_day_post_1`. Holidays are known years ahead, so they are valid inputs for the forecast dates:
+
+```python
+for day, name in self.holiday_days().items():
+    for offset in range(-window, window + 1):
+        column = self.column_for(name, offset)
+        self.daily.at[day + pd.Timedelta(days=offset), column] = 1.0
+```
+
+`ChronosModel` runs Amazon Chronos-2 zero-shot on the last `context_length` prices and returns the median forecast:
 
 ```python
 forecast = pipeline.predict_df(
     self.context_frame(),
-    future_df=self.future_covariates(future_features, future_calendar),
     prediction_length=len(future_calendar),
     quantile_levels=[0.5],
     id_column=ID_COLUMN,
@@ -106,7 +114,7 @@ if improvement >= self.min_improvement:
 | `NaiveModel` | Repeats the last price. The baseline every other model has to beat. |
 | `GradientBoostingModel` | scikit-learn gradient boosted trees on recent daily price changes, plus degree days. Forecasts several days ahead by feeding each prediction back in. |
 | `GreykiteModel` | LinkedIn Greykite Silverkite: trend, seasonality, recent prices as lags, and US holiday dummies as regressors. Each holiday gets a dummy for the day itself and for up to 4 days before and after (`labor_day_pre_2`, `labor_day_post_1`). Dummies that are never 1 in the training window are left out. |
-| `ChronosModel` | Amazon Chronos-2, a pretrained time series model, used zero-shot on CPU. Heating and cooling degree days can be passed as known future covariates. Tuned on context length and weather on or off. |
+| `ChronosModel` | Amazon Chronos-2, a pretrained time series model, used zero-shot on CPU on the price history alone. Tuned on context length. |
 
 ### Data, backtests, search, and publishing
 
@@ -166,7 +174,7 @@ model = mlflow.pyfunc.load_model("models:/natgas-price-forecaster@champion")
 model.predict(future_dates_frame)  # columns: date plus the features the model uses
 ```
 
-On an 8 core CPU the grid notebook takes about 9 minutes and the Bayesian notebook about 13, most of it Chronos-2 and Greykite.
+On an 8 core CPU the grid notebook takes about 11 minutes and the Bayesian notebook about 10, most of it Greykite.
 
 ## Spark
 

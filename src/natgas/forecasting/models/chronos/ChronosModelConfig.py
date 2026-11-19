@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from natgas.forecasting.models.base.AbstractConfigWrapper import AbstractConfigWrapper
 
@@ -17,15 +17,12 @@ class ChronosModelConfig(AbstractConfigWrapper):
 
     model_id        Hugging Face model, a Chronos-2 checkpoint
     context_length  how many recent business days the model reads, up to 8192
-    use_weather     pass heating and cooling degree days as known future covariates
     """
 
     model_name = "chronos"
 
     model_id: str = "amazon/chronos-2"
     context_length: int = 512
-    use_weather: bool = True
-    weather_columns: list[str] = field(default_factory=lambda: ["hdd", "cdd"])
     device: str = "cpu"
 
     def validate(self) -> None:
@@ -36,21 +33,11 @@ class ChronosModelConfig(AbstractConfigWrapper):
 
     @classmethod
     def default_grid(cls) -> dict[str, list]:
-        return {
-            "context_length": [128, 512, 2048],
-            "use_weather": [True, False],
-        }
+        return {"context_length": [128, 512, 2048]}
 
     @classmethod
     def default_search_space(cls) -> dict:
-        return {
-            "context_length": {"low": 64, "high": 2048, "step": 64},
-            "use_weather": [True, False],
-        }
-
-    @property
-    def required_features(self) -> list[str]:
-        return list(self.weather_columns) if self.use_weather else []
+        return {"context_length": {"low": 64, "high": 2048, "step": 64}}
 
     @property
     def max_horizon_days(self) -> int:
