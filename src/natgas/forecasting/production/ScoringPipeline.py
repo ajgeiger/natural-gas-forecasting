@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import date, datetime
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -70,11 +71,17 @@ class ScoringPipeline:
                 return kinds.value_counts().to_dict()
         return {}
 
-    def run(self) -> ScoringRun:
+    def refresh_data(self) -> dict[str, int]:
+        """Step 1: rows loaded per source, or nothing when refresh is off."""
+        init_db(self.settings.db_url)
+        if not self.refresh:
+            return {}
+        return DataRefresher(self.settings, self.today).refresh()
+
+    def score_models(self) -> ScoringRun:
+        """Steps 2 and 3: score both stages. Loaded and actuals are left empty."""
         db_url = self.settings.db_url
         init_db(db_url)
-        loaded = DataRefresher(self.settings, self.today).refresh() if self.refresh else {}
-
         provider = ForecastDataProvider.from_settings(
             self.settings, self.tuning.horizon_days, self.tuning.target_column, live_weather=True
         )
@@ -84,16 +91,33 @@ class ScoringPipeline:
         loader = RegisteredModelLoader(self.tuning.tracking_uri, self.tuning.registered_model_name)
         scorer = ProductionScorer(provider, loader, PredictionStore(db_url))
         saved = scorer.score(as_of, run_id, run_timestamp)
-
-        actuals = ActualsRefresher(db_url, self.tuning.target_column).refresh(as_of.date())
-        ForecastMonitor(db_url).create_views()
-        log.info("run %s as of %s: saved %s, %d matured", run_id, as_of.date(), saved, actuals)
         return ScoringRun(
             run_id=run_id,
             run_timestamp=run_timestamp,
             as_of_date=as_of,
-            loaded=loaded,
+            loaded={},
             saved=saved,
-            actuals=actuals,
+            actuals=0,
             weather_days=self.weather_days(provider, as_of),
         )
+
+    def backfill_actuals(self, as_of_date: date) -> int:
+        """Steps 4 and 5: matured forecasts copied, then the accuracy views."""
+        db_url = self.settings.db_url
+        actuals = ActualsRefresher(db_url, self.tuning.target_column).refresh(as_of_date)
+        ForecastMonitor(db_url).create_views()
+        return actuals
+
+    def run(self) -> ScoringRun:
+        loaded = self.refresh_data()
+        scored = self.score_models()
+        actuals = self.backfill_actuals(scored.as_of_date.date())
+        run = replace(scored, loaded=loaded, actuals=actuals)
+        log.info(
+            "run %s as of %s: saved %s, %d matured",
+            run.run_id,
+            run.as_of_date.date(),
+            run.saved,
+            run.actuals,
+        )
+        return run
