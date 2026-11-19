@@ -10,9 +10,13 @@ readme = "README.md"
 requires-python = ">=3.10,<3.11"
 authors = [{ name = "Alex Geiger" }]
 dependencies = [
+    "joblib>=1.3",
+    "mlflow>=3.0",
+    "numpy>=1.24",
     "pandas>=2.0",
     "pyyaml>=6.0",
     "requests>=2.31",
+    "scikit-learn>=1.4",
     "sqlalchemy>=2.0",
     "typer>=0.12",
     "yfinance>=0.2.54",
@@ -27,7 +31,6 @@ dev = [
 # Spark also needs Java 17
 spark = ["pyspark>=3.5,<4"]
 # filled in by later PRs
-models = []
 dashboard = []
 
 [project.scripts]

@@ -12,6 +12,7 @@ from natgas.db import init_db
 from natgas.de.prices import PriceLoader
 from natgas.de.storage import StorageLoader
 from natgas.de.weather import WeatherLoader
+from natgas.forecasting.tuning import TuningConfig, TuningPipeline
 
 app = typer.Typer(help="Natural gas forecasting pipeline.", no_args_is_help=True)
 ingest_app = typer.Typer(help="Load source data into the database.", no_args_is_help=True)
@@ -94,8 +95,25 @@ def ingest_all_command(start: str = StartOption, end: str = EndOption) -> None:
         raise typer.Exit(code=1)
 
 
-if __name__ == "__main__":
-    app()
+@app.command("tune")
+def tune_command(
+    config: str = typer.Option("config/tuning.yaml", help="Tuning config file."),
+    publish: bool = typer.Option(True, help="Register the best model in MLflow."),
+) -> None:
+    """Backtest every config, log to MLflow, and publish the best model."""
+    settings = load_settings()
+    pipeline = TuningPipeline.from_settings(TuningConfig.from_yaml(config), settings)
+    outcome = pipeline.run(publish=publish)
+
+    columns = ["model_name", "hyperparameters", "mae", "rmse", "mape", "wape", "bias"]
+    if "skill_vs_naive" in outcome.summary:
+        columns.append("skill_vs_naive")
+    typer.echo(outcome.summary[columns].head(10).to_string(index=False))
+    typer.echo(f"best: {outcome.best_model_name} {outcome.best_hyperparameters}")
+    if outcome.registered_version:
+        typer.echo(
+            f"registered {outcome.registered_model_name} version {outcome.registered_version}"
+        )
 
 
 @app.command("spark-show")
@@ -112,3 +130,7 @@ def spark_show_command(table: str, rows: int = typer.Option(5, help="Rows to pri
         typer.echo(f"{table}: {frame.count()} rows")
     finally:
         database.stop()
+
+
+if __name__ == "__main__":
+    app()

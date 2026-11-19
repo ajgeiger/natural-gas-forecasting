@@ -16,7 +16,9 @@ data/*.db-journal
 data/raw/
 mlruns/
 mlartifacts/
-models/
+mlflow.db
+/models/
+/outputs/
 
 # spark
 spark-warehouse/
