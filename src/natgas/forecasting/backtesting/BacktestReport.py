@@ -10,6 +10,9 @@ from natgas.forecasting.backtesting.BacktestResult import BacktestResult
 from natgas.forecasting.backtesting.ForecastMetrics import ForecastMetrics
 from natgas.forecasting.models.base.AbstractConfigWrapper import AbstractConfigWrapper
 
+# Days ahead grouped into short, medium, and long range
+HORIZON_BUCKETS = [(1, 5), (6, 15), (16, 30)]
+
 
 @dataclass
 class BacktestReport:
@@ -40,3 +43,18 @@ class BacktestReport:
             for step, group in table.groupby("step")
         }
         return pd.DataFrame.from_dict(rows, orient="index").rename_axis("step")
+
+    def metrics_by_bucket(self, buckets: list[tuple[int, int]] = HORIZON_BUCKETS) -> pd.DataFrame:
+        """Scores for ranges of days ahead, for example days 1 to 5.
+
+        Buckets that start past the longest forecast are skipped.
+        """
+        table = self.forecasts()
+        rows = {}
+        for first, last in buckets:
+            group = table[table["step"].between(first, last)]
+            if len(group):
+                rows[f"days {first} to {last}"] = ForecastMetrics.score(
+                    group["actual"], group["prediction"]
+                )
+        return pd.DataFrame.from_dict(rows, orient="index").rename_axis("days_ahead")

@@ -303,6 +303,38 @@ def test_backtester_records_each_as_of(provider: ForecastDataProvider) -> None:
     assert set(report.metrics()) == set(ForecastMetrics.names)
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        NaiveModelConfig(),
+        GradientBoostingModelConfig(max_iter=20, use_weather=True),
+        GreykiteModelConfig(history_years=0, fit_algorithm="ridge"),
+        ChronosModelConfig(context_length=64, use_weather=True),
+    ],
+)
+def test_models_forecast_30_days_ahead(
+    config: AbstractConfigWrapper, provider: ForecastDataProvider
+) -> None:
+    long_range = ForecastDataProvider(provider.target, provider.feature_sources, horizon_days=30)
+    dates = long_range.backtest_dates("2023-01-05", "2023-05-15", step_days=60)
+    report = Backtester(long_range, dates).run(config)
+    forecasts = report.forecasts()
+    assert len(forecasts) == 30 * len(dates)
+    assert forecasts["step"].max() == 30
+    assert forecasts["prediction"].notna().all()
+    buckets = report.metrics_by_bucket()
+    assert list(buckets.index) == ["days 1 to 5", "days 6 to 15", "days 16 to 30"]
+    assert list(buckets.columns) == ForecastMetrics.names
+
+
+def test_buckets_past_the_horizon_are_skipped(provider: ForecastDataProvider) -> None:
+    dates = provider.backtest_dates("2022-09-01", step_days=30)
+    report = Backtester(provider, dates).run(NaiveModelConfig())
+    assert list(report.metrics_by_bucket().index) == ["days 1 to 5"]
+    custom = report.metrics_by_bucket([(1, 2), (3, 5)])
+    assert list(custom.index) == ["days 1 to 2", "days 3 to 5"]
+
+
 def test_backtester_checks_config_against_provider(provider: ForecastDataProvider) -> None:
     no_weather = ForecastDataProvider(provider.target, [], horizon_days=5)
     backtester = Backtester(no_weather, no_weather.backtest_dates("2022-09-01", step_days=30))

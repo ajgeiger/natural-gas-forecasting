@@ -6,7 +6,7 @@
 target_column: high        # column in the prices table to forecast
 
 backtest:
-  horizon_days: 5          # trading days to forecast from each as-of date
+  horizon_days: 30         # trading days to forecast from each as-of date
   start: "2022-01-01"      # first as-of date
   end:                     # last as-of date, blank means the latest data
   step_days: 14            # calendar days between as-of dates

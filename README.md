@@ -1,45 +1,53 @@
 # natural-gas-forecasting
 
-**Start here: [grid search backtest notebook](experiments/grid_search_backtest.ipynb).** It runs every model on the same 127 rolling as-of dates, scores them, and publishes the winner to the MLflow model registry. The [Bayesian search notebook](experiments/bayesian_backtest.ipynb) repeats the search with Optuna.
+**Start here: [grid search backtest notebook](experiments/grid_search_backtest.ipynb).** It runs every model on the same 125 rolling as-of dates, forecasts 30 trading days ahead from each, scores them, and publishes the winner to the MLflow model registry. The [Bayesian search notebook](experiments/bayesian_backtest.ipynb) repeats the search with Optuna.
 
 Daily forecasts of the natural gas front-month futures price (Yahoo Finance `NG=F`, daily high), using weather in major gas-demand cities and EIA weekly storage as inputs.
 
 ## Why it matters
 
-Natural gas is one of the most volatile commodities there is. Utilities, power plants, and industrial buyers plan purchases days ahead, and a few cents per MMBtu on millions of MMBtu is real money. Weather drives demand, storage shows how tight supply is, and the futures price reacts to both.
+Natural gas is one of the most volatile commodities there is. Utilities, power plants, and industrial buyers plan purchases days and weeks ahead, and a few cents per MMBtu on millions of MMBtu is real money. Weather drives demand, storage shows how tight supply is, and the futures price reacts to both.
 
 Most forecasting demos stop at one model on one train and test split. This project is built the way a production team would want it: every model is backtested on the same dates with no look-ahead, every run is logged, and a model only replaces the baseline when it earns it.
 
 ## What it shows
 
-Prices from 2015-01-02 to 2026-11-18. 127 as-of dates every 14 days from 2021-12-31 to 2026-10-30, each forecasting the next 5 trading days. Same dates for every model. Best config per model, MAE, RMSE, and bias in dollars per MMBtu, MAPE and WAPE in percent.
+Prices from 2015-01-02 to 2026-11-18. 125 as-of dates every 14 days from 2021-12-31 to 2026-10-02, each forecasting the next 30 trading days (`backtest.horizon_days` in `config/tuning.yaml`). The two as-of dates after 2026-10-02 are skipped because 30 trading days of actuals do not exist yet. Same dates for every model. Best config per model, MAE, RMSE, and bias in dollars per MMBtu, MAPE and WAPE in percent.
 
 Grid search (39 configs):
 
 | Model | MAE | RMSE | MAPE | WAPE | Bias | Best config |
 | --- | --- | --- | --- | --- | --- | --- |
-| Gradient boosting | 0.2462 | 0.3885 | 6.19 | 6.49 | -0.0011 | 5 lags, depth 2, learning rate 0.03, no weather |
-| Naive | 0.2462 | 0.3828 | 6.16 | 6.49 | 0.0001 | none |
-| Chronos-2 | 0.2482 | 0.3874 | 6.18 | 6.54 | -0.0098 | context 512, no weather |
-| Greykite | 0.3035 | 0.4504 | 7.89 | 8.00 | 0.0146 | 4 years of history, 3 price lags, holiday dummies off |
+| Chronos-2 | 0.5192 | 0.7975 | 13.12 | 13.65 | -0.0420 | context 512, weather |
+| Gradient boosting | 0.5236 | 0.8024 | 13.55 | 13.76 | 0.0132 | 5 lags, depth 2, learning rate 0.03, no weather |
+| Naive | 0.5259 | 0.8107 | 13.50 | 13.82 | 0.0037 | none |
+| Greykite | 0.7362 | 1.0741 | 19.36 | 19.35 | 0.0030 | 4 years, 3 price lags, holiday dummies off |
 
 Bayesian search (19 configs, 6 trials per model):
 
 | Model | MAE | RMSE | MAPE | WAPE | Bias | Best config |
 | --- | --- | --- | --- | --- | --- | --- |
-| Naive | 0.2462 | 0.3828 | 6.16 | 6.49 | 0.0001 | none |
-| Gradient boosting | 0.2481 | 0.3893 | 6.21 | 6.53 | -0.0049 | 13 lags, depth 2, learning rate 0.018, min leaf 89, weather |
-| Chronos-2 | 0.2490 | 0.3903 | 6.23 | 6.56 | -0.0145 | context 1472, no weather |
-| Greykite | 0.3089 | 0.4490 | 8.05 | 8.14 | 0.0063 | 6.9 years, 1 price lag, ridge, holiday dummies off |
+| Chronos-2 | 0.5169 | 0.7924 | 13.09 | 13.59 | -0.0350 | context 768, weather |
+| Naive | 0.5259 | 0.8107 | 13.50 | 13.82 | 0.0037 | none |
+| Gradient boosting | 0.5377 | 0.8249 | 13.80 | 14.13 | 0.0049 | 13 lags, depth 2, learning rate 0.018, min leaf 89, weather |
+| Greykite | 0.7821 | 1.1131 | 20.68 | 20.56 | -0.0172 | 6.9 years, 1 price lag, ridge, holiday dummies off |
 
-Nothing beat naive by the 1 percent margin, so the publisher kept naive and registered it as `natgas-price-forecaster` version 4 (`@champion`). That is the expected result for a liquid futures price over a few days, and it is why the publishing rule exists.
+MAE by horizon bucket, best grid config per model:
+
+| Model | Days 1 to 5 | Days 6 to 15 | Days 16 to 30 |
+| --- | --- | --- | --- |
+| Chronos-2 | 0.2518 | 0.4628 | 0.6459 |
+| Gradient boosting | 0.2475 | 0.4624 | 0.6565 |
+| Naive | 0.2476 | 0.4656 | 0.6589 |
+| Greykite | 0.3039 | 0.6123 | 0.9629 |
+
+Chronos-2 beat naive by 1.28 percent in grid search, clearing the 1 percent margin, so the publisher registered it as `natgas-price-forecaster` version 6 (`@champion`). Bayesian search found a slightly better Chronos-2 (1.72 percent better than naive at context 768).
 
 What the numbers say:
 
-- Chronos-2 lands within 1 percent of naive in grid search (MAE 0.2482 against 0.2462) with no training at all.
-- Weather as a known future covariate did not help Chronos-2 at this horizon. The best Chronos-2 configs in both searches leave it off. Backtests use observed weather as a perfect forecast, so live results with real weather forecasts would not be better.
-- US holiday dummies with 1 to 4 days before and after did not help Greykite. The best configs with them were MAE 0.3047 in grid search (4 years, 3 lags, window 2) and 0.3166 in Bayesian search (7.2 years, 3 lags, window 4, changepoints). With the dummies off, Greykite falls back to its own built-in holiday events.
-- Silverkite is built for series with strong trend and seasonality, which day to day futures prices do not have.
+- Over 5 days nothing beats repeating the last price. Over 30 days Chronos-2 pulls ahead, and the gap grows with the horizon: it trails naive on days 1 to 5 and leads on days 16 to 30.
+- Chronos-2 does not need weather to win. Without it, context 512 scores MAE 0.5204, 1.05 percent better than naive, with the lowest RMSE of any config (0.7774). Weather helps a little, but backtests hand it perfect weather for all 30 days, so treat that gain as an upper bound.
+- Holiday dummies did not help Greykite, and Silverkite's trend and seasonality terms drift badly past two weeks.
 
 ## How it works
 
@@ -115,7 +123,7 @@ if improvement >= self.min_improvement:
 | `ForecastDataProvider` | Give it an as-of date and it returns a `ForecastWindow`: training data on or before that date, feature values for the dates to predict, and the actual prices used to score the forecast. |
 | `AbstractFeatureSource` | Base class for extra data. Each source returns only what was known on the as-of date. `WeatherFeatureSource` adds heating and cooling degree days. `HolidayFeatureSource` adds US holiday dummies from the `holidays` package, which are known in advance and so are valid for the forecast dates. `StorageFeatureSource` adds the EIA storage level once each weekly report is published. |
 | `Backtester` | For each as-of date gets the window, checks for leakage, trains a fresh model, predicts, and records a `BacktestResult`. Runs dates in parallel with `n_jobs`. |
-| `BacktestReport`, `ForecastMetrics` | Score one config: MAE, RMSE, MAPE, WAPE, and bias, overall and by days ahead. |
+| `BacktestReport`, `ForecastMetrics` | Score one config: MAE, RMSE, MAPE, WAPE, and bias, overall, by days ahead, and by horizon bucket (days 1 to 5, 6 to 15, 16 to 30). |
 | `AbstractOptimizer` | Backtests candidate configs, logs each one as a nested MLflow run, skips repeats, records failures without stopping, and builds the results table with skill against naive. |
 | `GridSearchOptimizer`, `BayesianOptimizer` | Every combination in the grid, or Optuna's TPE sampler picking each next config from the ones already scored. |
 | `ModelPublisher` | Publishes the best config only if it lowers error by at least `min_improvement` against naive (1 percent by default). The chosen config is retrained on all data, logged as an MLflow pyfunc model, registered, and given the `champion` alias. |
@@ -127,7 +135,7 @@ To add a model, create a folder under `models/` with a config class and a model 
 
 - Training data always ends on the as-of date, and the test period starts the next trading day. The backtester checks this on every window.
 - Storage values only appear once EIA would have published them (6 days after the week ends).
-- Weather for future dates would come from the forecast made on the as-of date. Past forecasts are not stored, so backtests use the observed weather as a perfect forecast. This makes weather models look slightly better than they will live. Pass `use_observed_as_forecast=False` to `WeatherFeatureSource` to hide future weather instead.
+- Weather for future dates would come from the forecast made on the as-of date. Past forecasts are not stored, so backtests use the observed weather as a perfect forecast. This makes weather models look better than they will live, and much more so at 30 days than at 5: real weather forecasts lose most of their skill after about two weeks, while the backtest still hands the models the exact weather for days 16 to 30. Pass `use_observed_as_forecast=False` to `WeatherFeatureSource` to hide future weather instead.
 
 ## Quickstart
 
@@ -166,7 +174,7 @@ model = mlflow.pyfunc.load_model("models:/natgas-price-forecaster@champion")
 model.predict(future_dates_frame)  # columns: date plus the features the model uses
 ```
 
-On an 8 core CPU the grid notebook takes about 9 minutes and the Bayesian notebook about 13, most of it Chronos-2 and Greykite.
+On an 8 core CPU the grid notebook takes about 16 minutes and the Bayesian notebook about 13, most of it Greykite.
 
 ## Spark
 

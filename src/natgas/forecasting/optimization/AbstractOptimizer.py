@@ -99,6 +99,9 @@ class AbstractOptimizer(ABC):
         mlflow.log_metrics({**report.metrics(), "backtest_seconds": report.seconds})
         for step, scores in report.metrics_by_step().iterrows():
             mlflow.log_metrics({f"{name}_step_{step}": value for name, value in scores.items()})
+        for bucket, scores in report.metrics_by_bucket().iterrows():
+            label = bucket.replace(" ", "_")
+            mlflow.log_metrics({f"{name}_{label}": value for name, value in scores.items()})
 
         with TemporaryDirectory() as folder:
             forecasts_path = Path(folder) / "backtest_forecasts.csv"
