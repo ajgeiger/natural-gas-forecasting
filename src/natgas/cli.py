@@ -1,4 +1,4 @@
-"""Command line entry point: natgas init-db, natgas ingest ..., natgas spark-show."""
+"""Command line entry point: natgas init-db, ingest, tune, score, export-backtests, spark-show."""
 
 from __future__ import annotations
 
@@ -12,6 +12,13 @@ from natgas.db import init_db
 from natgas.de.prices import PriceLoader
 from natgas.de.storage import StorageLoader
 from natgas.de.weather import WeatherLoader
+from natgas.forecasting.data import ForecastDataProvider
+from natgas.forecasting.production import (
+    BacktestExporter,
+    ChallengerPublisher,
+    GridSearchRuns,
+    ScoringPipeline,
+)
 from natgas.forecasting.tuning import TuningConfig, TuningPipeline
 
 app = typer.Typer(help="Natural gas forecasting pipeline.", no_args_is_help=True)
@@ -22,6 +29,7 @@ LOADERS = {"prices": PriceLoader, "weather": WeatherLoader, "storage": StorageLo
 
 StartOption = typer.Option(None, help="First date, YYYY-MM-DD. Defaults to the config start.")
 EndOption = typer.Option(None, help="Last date, YYYY-MM-DD. Defaults to today.")
+TuningOption = typer.Option("config/tuning.yaml", help="Tuning config file.")
 
 
 def prepare(start: str | None, end: str | None) -> tuple[Settings, date, date]:
@@ -116,6 +124,70 @@ def tune_command(
         typer.echo(
             f"registered {outcome.registered_model_name} version {outcome.registered_version}"
         )
+
+
+def grid_search_setup(config: str) -> tuple[Settings, TuningConfig, GridSearchRuns]:
+    """Settings, tuning config, and the grid search results the commands below read."""
+    settings = load_settings()
+    init_db(settings.db_url)
+    tuning = TuningConfig.from_yaml(config)
+    runs = GridSearchRuns(
+        tuning.tracking_uri,
+        horizon_days=tuning.horizon_days,
+        selection_metric=tuning.selection_metric,
+    )
+    return settings, tuning, runs
+
+
+@app.command("export-backtests")
+def export_backtests_command(
+    config: str = TuningOption,
+    output: str = typer.Option("outputs/backtest_forecasts.parquet", help="Parquet file."),
+) -> None:
+    """Write the best backtest per model from the latest grid search to the database and Parquet."""
+    settings, tuning, runs = grid_search_setup(config)
+    provider = ForecastDataProvider.from_settings(
+        settings, tuning.horizon_days, tuning.target_column
+    )
+    exporter = BacktestExporter(
+        runs, provider, settings.db_url, tuning.registered_model_name, tuning.n_jobs
+    )
+    frame = exporter.build()
+    rows = exporter.write(frame, output)
+    typer.echo(frame.groupby(["model", "model_version"]).size().to_string())
+    typer.echo(f"backtest_forecasts: {rows} rows, also in {output}")
+
+
+@app.command("register-challenger")
+def register_challenger_command(
+    config: str = TuningOption,
+    model: str = typer.Option("gradient_boosting", help="Model whose best config to register."),
+) -> None:
+    """Register the best grid search config of a model under the challenger alias."""
+    settings, tuning, runs = grid_search_setup(config)
+    provider = ForecastDataProvider.from_settings(
+        settings, tuning.horizon_days, tuning.target_column
+    )
+    publisher = ChallengerPublisher(
+        runs, provider, tuning.registered_model_name, model, n_jobs=tuning.n_jobs
+    )
+    version = publisher.publish()
+    typer.echo(f"registered {tuning.registered_model_name} version {version} as @challenger")
+
+
+@app.command("score")
+def score_command(
+    config: str = TuningOption,
+    refresh: bool = typer.Option(True, help="Load the newest data first."),
+) -> None:
+    """Refresh data, score production and staging, and backfill actuals. Safe to rerun."""
+    settings = load_settings()
+    run = ScoringPipeline(settings, TuningConfig.from_yaml(config), refresh=refresh).run()
+    typer.echo(f"run {run.run_id} as of {run.as_of_date.date()}")
+    typer.echo(f"loaded: {run.loaded}")
+    typer.echo(f"predictions saved: {run.saved}")
+    typer.echo(f"future weather days: {run.weather_days}")
+    typer.echo(f"matured forecasts in forecast_actuals: {run.actuals}")
 
 
 @app.command("spark-show")

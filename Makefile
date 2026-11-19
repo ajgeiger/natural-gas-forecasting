@@ -22,7 +22,17 @@ ingest:
 tune:
 	natgas tune
 
+# Refresh data, score production and staging, backfill actuals
+score:
+	natgas score
+
+export-backtests:
+	natgas export-backtests
+
+register-challenger:
+	natgas register-challenger
+
 spark-show:
 	natgas spark-show prices
 
-.PHONY: install lint format test init-db ingest tune spark-show
+.PHONY: install lint format test init-db ingest tune score export-backtests register-challenger spark-show

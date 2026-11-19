@@ -68,3 +68,65 @@ class IngestionRun(Base):
     rows: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(16), default="running")
     message: Mapped[str | None] = mapped_column(Text)
+
+
+class BacktestForecast(Base):
+    """Every backtest forecast for the best config of each model, for charts.
+
+    Rewritten in full by BacktestExporter from the latest grid search.
+    """
+
+    __tablename__ = "backtest_forecasts"
+
+    model: Mapped[str] = mapped_column(String(32), primary_key=True)
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    horizon_day: Mapped[int] = mapped_column(Integer, primary_key=True)
+    target_date: Mapped[date] = mapped_column(Date)
+    model_version: Mapped[str] = mapped_column(String(64))
+    forecast: Mapped[float] = mapped_column(Float)
+    lower: Mapped[float | None] = mapped_column(Float)
+    upper: Mapped[float | None] = mapped_column(Float)
+    actual: Mapped[float] = mapped_column(Float)
+
+
+class Prediction(Base):
+    """Live forecasts, one run per as-of date and stage. Rows are only ever added.
+
+    The key makes a second run for the same as-of date and stage fail instead
+    of adding duplicates.
+    """
+
+    __tablename__ = "predictions"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    stage: Mapped[str] = mapped_column(String(16), primary_key=True)
+    horizon_day: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(32), index=True)
+    run_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    target_date: Mapped[date] = mapped_column(Date)
+    model: Mapped[str] = mapped_column(String(32))
+    model_version: Mapped[str] = mapped_column(String(64))
+    forecast: Mapped[float] = mapped_column(Float)
+    lower: Mapped[float | None] = mapped_column(Float)
+    upper: Mapped[float | None] = mapped_column(Float)
+
+
+class ForecastActual(Base):
+    """Live forecasts whose target date has passed, with the actual price and error."""
+
+    __tablename__ = "forecast_actuals"
+
+    as_of_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    stage: Mapped[str] = mapped_column(String(16), primary_key=True)
+    horizon_day: Mapped[int] = mapped_column(Integer, primary_key=True)
+    horizon_bucket: Mapped[str] = mapped_column(String(16))
+    run_id: Mapped[str] = mapped_column(String(32))
+    target_date: Mapped[date] = mapped_column(Date)
+    model: Mapped[str] = mapped_column(String(32))
+    model_version: Mapped[str] = mapped_column(String(64))
+    forecast: Mapped[float] = mapped_column(Float)
+    lower: Mapped[float | None] = mapped_column(Float)
+    upper: Mapped[float | None] = mapped_column(Float)
+    actual: Mapped[float] = mapped_column(Float)
+    error: Mapped[float] = mapped_column(Float)
+    filled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

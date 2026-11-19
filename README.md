@@ -90,14 +90,14 @@ def check_no_leakage(
         raise AssertionError(f"Forecast dates must start after {as_of.date()}")
 ```
 
-`ChronosModel` runs Amazon Chronos-2 zero-shot. The context is prices up to the as-of date, and degree days for the forecast dates go in as known future covariates:
+`ChronosModel` runs Amazon Chronos-2 zero-shot. The context is prices up to the as-of date, and degree days for the forecast dates go in as known future covariates. The median is the point forecast, and the 10th and 90th percentiles make an 80 percent interval:
 
 ```python
 forecast = pipeline.predict_df(
     self.context_frame(),
     future_df=self.future_covariates(future_features, future_calendar),
     prediction_length=len(future_calendar),
-    quantile_levels=[0.5],
+    quantile_levels=[LOWER_QUANTILE, MEDIAN_QUANTILE, UPPER_QUANTILE],
     id_column=ID_COLUMN,
     timestamp_column=TIME_COLUMN,
     target=TARGET_COLUMN,
@@ -145,7 +145,7 @@ To add a model, create a folder under `models/` with a config class and a model 
 
 - Training data always ends on the as-of date, and the test period starts the next trading day. The backtester checks this on every window.
 - Storage values only appear once EIA would have published them (6 days after the week ends).
-- Weather for future dates would come from the forecast made on the as-of date. Past forecasts are not stored, so backtests use the observed weather as a perfect forecast. This makes weather models look better than they will live, and much more so at 30 days than at 5: real weather forecasts lose most of their skill after about two weeks, while the backtest still hands the models the exact weather for days 16 to 30. Pass `use_observed_as_forecast=False` to `WeatherFeatureSource` to hide future weather instead.
+- Weather for future dates would come from the forecast made on the as-of date. Past forecasts are not stored, so backtests use the observed weather as a perfect forecast. This makes weather models look better than they will live, and much more so at 30 days than at 5: real weather forecasts lose most of their skill after about two weeks, while the backtest still hands the models the exact weather for days 16 to 30. Pass `use_observed_as_forecast=False` to `WeatherFeatureSource` to hide future weather instead. Production scoring cannot see future weather either, so it uses the real forecast and then normals (see below).
 
 ## Quickstart
 
@@ -185,6 +185,42 @@ model.predict(future_dates_frame)  # columns: date plus the features the model u
 ```
 
 On an 8 core CPU the grid notebook takes about 25 minutes and the Bayesian notebook about 40, most of it Greykite.
+
+## Production scoring
+
+`natgas score` (or `make score`) is the daily job. It runs once by hand today; no schedule is set up yet.
+
+1. `DataRefresher` reloads the last 30 days of prices, weather, and storage with the same loaders as `natgas ingest`, so late corrections replace earlier values.
+2. The as-of date is the latest trading day before today. Today's bar is still trading, so it is never used.
+3. `ProductionScorer` loads two versions of `natgas-price-forecaster` from the MLflow registry: `@champion` is scored as stage `production` (Chronos-2, context 512, with weather, version 8) and `@challenger` as stage `staging` (the best grid search gradient boosting config, version 9). Each version's config is refit on data through the as-of date, the same way every backtest ran. The scorer refuses a Chronos-2 config without weather or a Greykite config with weather.
+4. `PredictionStore` appends 30 rows per stage to `predictions`. A stage that already has rows for the as-of date is skipped, and the table key (`as_of_date`, `stage`, `horizon_day`) blocks duplicates, so reruns are safe.
+5. `ActualsRefresher` copies every forecast whose target date has a price into `forecast_actuals`, with the actual and the error.
+6. `ForecastMonitor` recreates the `forecast_accuracy` and `forecast_accuracy_rolling` views: MAE, MAPE, WAPE, and bias by model, stage, and horizon bucket (days 1 to 5, 6 to 15, 16 to 30, and all days), over all matured forecasts and over the last 20 as-of dates.
+
+Future weather. Chronos-2 uses degree days for the 30 forecast days, and those days have not happened yet. `ForecastWeatherFeatureSource` fills them with the Open-Meteo forecast that the weather loader stores (14 days, `weather.forecast_days` in `config/settings.yaml`, which covers about 10 trading days) and, after that, the daily normal: the average degree days for that day of the year over the last 10 years, smoothed over 15 days. The backtests used observed weather for all 30 days, so expect live accuracy on days 11 to 30 to sit closer to Chronos-2 without weather.
+
+Forecast dates past the last price skip exchange holidays (`TradingCalendar`), so every forecast gets an actual.
+
+```bash
+natgas register-challenger   # once: best gradient boosting config as @challenger
+natgas export-backtests      # backtest_forecasts table and outputs/backtest_forecasts.parquet
+natgas score                 # refresh, score, backfill actuals, update the views
+natgas score --no-refresh    # score from the data already loaded
+```
+
+`export-backtests` takes the best config per model from the latest 30 day grid search in MLflow and writes the forecasts that search logged. Chronos-2 is backtested again on the same as-of dates only to add its interval, and as-of dates where the rerun does not match the logged forecast (for example after the weather archive revised recent days) get no interval.
+
+Tables and views in `data/natgas.db`:
+
+| Name | Kind | Columns |
+| --- | --- | --- |
+| `backtest_forecasts` | table, rewritten by the export | as_of_date, target_date, horizon_day, model, model_version, forecast, lower, upper, actual |
+| `predictions` | table, append only | run_id, run_timestamp, as_of_date, target_date, horizon_day, model, model_version, stage, forecast, lower, upper |
+| `forecast_actuals` | table, matured predictions | the `predictions` columns plus horizon_bucket, actual, error (forecast minus actual), filled_at |
+| `forecast_accuracy` | view | model, stage, horizon_bucket, forecasts, as_of_dates, first_as_of_date, last_as_of_date, mae, mape, wape, bias |
+| `forecast_accuracy_rolling` | view | model, stage, horizon_bucket, as_of_date, as_of_dates, forecasts, mae, mape, wape, bias |
+
+`lower` and `upper` are the 10th and 90th percentiles, filled for Chronos-2 only. `model_version` is the registry version, or `run-` plus the MLflow run id for a backtest config that was never registered.
 
 ## Spark
 
@@ -241,7 +277,7 @@ flowchart LR
     db --> dashboard[dashboard]
 ```
 
-Ingestion, backtesting, MLflow tracking, and the model registry exist today. The daily forecast job and dashboard are planned.
+Ingestion, backtesting, MLflow tracking, the model registry, and the daily scoring job exist today. The dashboard is planned, and the scoring job is not on a schedule yet.
 
 ## Layout
 
@@ -256,9 +292,10 @@ src/natgas/de/          data loading
   utils.py              Loader base class, run logging, HTTP retries, date ranges
   spark_db.py           SparkDatabase, reads and writes the database over JDBC
 src/natgas/forecasting/ models, backtests, search, and publishing
-  data/                 ForecastDataProvider, ForecastWindow, SqlReader,
+  data/                 ForecastDataProvider, ForecastWindow, SqlReader, TradingCalendar,
                         AbstractFeatureSource, WeatherFeatureSource, HolidayFeatureSource,
-                        CalendarFeatureSource, StorageFeatureSource
+                        CalendarFeatureSource, StorageFeatureSource,
+                        ForecastWeatherFeatureSource
   models/
     base/               AbstractModelWrapper, AbstractConfigWrapper
     naive/              NaiveModel, NaiveModelConfig
@@ -271,6 +308,9 @@ src/natgas/forecasting/ models, backtests, search, and publishing
                         HyperparameterGrid, OptimizerCatalog
   tuning/               TuningConfig, TuningPipeline, TuningOutcome, ModelPublisher,
                         PublishDecision, MlflowModelAdapter
+  production/           ScoringPipeline, DataRefresher, ProductionScorer, PredictionStore,
+                        RegisteredModelLoader, ActualsRefresher, ForecastMonitor, ScoringRun,
+                        GridSearchRuns, BacktestExporter, ChallengerPublisher
 config/tuning.yaml      model grids and search spaces, backtest window, publish rule, MLflow
 experiments/            grid search and Bayesian search notebooks
 src/natgas/cli.py       natgas command
@@ -288,7 +328,8 @@ tests/                  pytest, no network calls
 - [x] Rolling-origin backtests and a scoreboard (MAE, RMSE, MAPE, WAPE, bias)
 - [x] Grid and Bayesian search logged to MLflow, winner registered as `champion` only if it beats naive
 - [ ] Model stages: Testing, Challenger, Champion, Legacy Champion
-- [ ] Daily forecast and weekly retrain jobs in GitHub Actions
+- [x] Daily scoring job (`natgas score`) for the champion and a challenger, with actuals and accuracy views
+- [ ] Run the scoring job on a schedule, and a weekly retrain
 - [ ] Streamlit dashboard
 
 ## Sources
