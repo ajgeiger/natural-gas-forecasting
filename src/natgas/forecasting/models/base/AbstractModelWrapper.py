@@ -25,6 +25,8 @@ class AbstractModelWrapper(ABC):
     """
 
     config_class: ClassVar[type[AbstractConfigWrapper]]
+    # True when predict_with_interval() fills lower and upper
+    makes_intervals: ClassVar[bool] = False
 
     def __init__(self, config: AbstractConfigWrapper | None = None) -> None:
         config = config if config is not None else self.config_class()
@@ -44,6 +46,18 @@ class AbstractModelWrapper(ABC):
     @abstractmethod
     def predict(self, future_features: pd.DataFrame) -> pd.Series:
         """Predict the target for each date in future_features.index."""
+
+    def predict_with_interval(self, future_features: pd.DataFrame) -> pd.DataFrame:
+        """Point forecast plus an 80 percent interval, one row per date.
+
+        Columns are prediction, lower, and upper. Models that do not make
+        intervals leave lower and upper empty. ChronosModel fills them.
+        """
+        prediction = self.predict(future_features)
+        return pd.DataFrame(
+            {"prediction": prediction, "lower": float("nan"), "upper": float("nan")},
+            index=prediction.index,
+        )
 
     @abstractmethod
     def save(self, folder: str | Path) -> None:

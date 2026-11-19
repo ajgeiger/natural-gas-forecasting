@@ -59,13 +59,15 @@ class Backtester:
 
         model = ModelCatalog.build(config)
         model.train(window.training_data)
-        prediction = model.predict(window.future_features)
+        prediction = model.predict_with_interval(window.future_features)
 
         forecasts = pd.DataFrame(
             {
                 "step": range(1, len(prediction) + 1),
                 "actual": window.test_target,
-                "prediction": prediction,
+                "prediction": prediction["prediction"],
+                "lower": prediction["lower"],
+                "upper": prediction["upper"],
             }
         )
         return BacktestResult(

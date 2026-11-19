@@ -17,6 +17,10 @@ SERIES_ID = "ng"
 TIME_COLUMN = "timestamp"
 TARGET_COLUMN = "target"
 ID_COLUMN = "id"
+# The median is the point forecast. The 10th and 90th percentiles make an 80 percent interval.
+LOWER_QUANTILE = 0.1
+MEDIAN_QUANTILE = 0.5
+UPPER_QUANTILE = 0.9
 
 
 class ChronosModel(AbstractModelWrapper):
@@ -25,13 +29,16 @@ class ChronosModel(AbstractModelWrapper):
     train() keeps the last context_length prices, plus any weather and
     calendar columns the config turns on, on a business day calendar.
     predict() hands them to Chronos-2, with those columns for the forecast
-    dates passed as known future covariates.
+    dates passed as known future covariates. The median is the point
+    forecast, and predict_with_interval() also returns the 10th and 90th
+    percentiles.
 
     The model weights are downloaded from Hugging Face once and cached. They
     are not saved with the model folder, only the model id is.
     """
 
     config_class = ChronosModelConfig
+    makes_intervals = True
     pipelines: ClassVar[dict[str, Chronos2Pipeline]] = {}
 
     def __init__(self, config: ChronosModelConfig | None = None) -> None:
@@ -67,6 +74,9 @@ class ChronosModel(AbstractModelWrapper):
         self.is_trained = True
 
     def predict(self, future_features: pd.DataFrame) -> pd.Series:
+        return self.predict_with_interval(future_features)["prediction"]
+
+    def predict_with_interval(self, future_features: pd.DataFrame) -> pd.DataFrame:
         self.check_trained()
         pipeline = self.pipeline_for(self.config.model_id, self.config.device)
         future_calendar = pd.bdate_range(
@@ -76,17 +86,22 @@ class ChronosModel(AbstractModelWrapper):
             self.context_frame(),
             future_df=self.future_covariates(future_features, future_calendar),
             prediction_length=len(future_calendar),
-            quantile_levels=[0.5],
+            quantile_levels=[LOWER_QUANTILE, MEDIAN_QUANTILE, UPPER_QUANTILE],
             id_column=ID_COLUMN,
             timestamp_column=TIME_COLUMN,
             target=TARGET_COLUMN,
             context_length=self.config.context_length,
             freq="B",
         )
-        # The median is the point forecast. Chronos-2 also returns it as "predictions".
-        values = forecast["0.5"].to_numpy()
-        dates = pd.DatetimeIndex(forecast[TIME_COLUMN])
-        return pd.Series(values, index=dates, name="prediction").reindex(future_features.index)
+        frame = pd.DataFrame(
+            {
+                "prediction": forecast[str(MEDIAN_QUANTILE)].to_numpy(),
+                "lower": forecast[str(LOWER_QUANTILE)].to_numpy(),
+                "upper": forecast[str(UPPER_QUANTILE)].to_numpy(),
+            },
+            index=pd.DatetimeIndex(forecast[TIME_COLUMN]),
+        )
+        return frame.reindex(future_features.index)
 
     def context_frame(self) -> pd.DataFrame:
         frame = self.context.rename_axis(TIME_COLUMN).reset_index()
