@@ -9,10 +9,12 @@ from natgas.config import Settings
 from natgas.db import get_engine
 from natgas.forecasting.data.AbstractFeatureSource import AbstractFeatureSource
 from natgas.forecasting.data.CalendarFeatureSource import CalendarFeatureSource
+from natgas.forecasting.data.ForecastWeatherFeatureSource import ForecastWeatherFeatureSource
 from natgas.forecasting.data.ForecastWindow import ForecastWindow
 from natgas.forecasting.data.HolidayFeatureSource import HolidayFeatureSource
 from natgas.forecasting.data.SqlReader import SqlReader
 from natgas.forecasting.data.StorageFeatureSource import StorageFeatureSource
+from natgas.forecasting.data.TradingCalendar import TradingCalendar
 from natgas.forecasting.data.WeatherFeatureSource import WeatherFeatureSource
 
 TARGET_COLUMN = "price"
@@ -47,9 +49,18 @@ class ForecastDataProvider:
 
     @classmethod
     def from_settings(
-        cls, settings: Settings, horizon_days: int = 5, target_column: str = "high"
+        cls,
+        settings: Settings,
+        horizon_days: int = 5,
+        target_column: str = "high",
+        live_weather: bool = False,
     ) -> ForecastDataProvider:
-        """Build a provider from the database: prices plus every feature source."""
+        """Build a provider from the database: prices plus every feature source.
+
+        Backtests use the observed weather for the forecast dates. Set
+        live_weather for production scoring: future dates then get the stored
+        weather forecast and, past its end, the daily normals.
+        """
         if target_column not in PRICE_COLUMNS:
             raise ValueError(f"target_column must be one of {PRICE_COLUMNS}")
         engine = get_engine(settings.db_url)
@@ -58,8 +69,12 @@ class ForecastDataProvider:
         prices["date"] = pd.to_datetime(prices["date"])
         target = prices.set_index("date")["value"]
 
+        if live_weather:
+            weather = ForecastWeatherFeatureSource.from_database(engine)
+        else:
+            weather = WeatherFeatureSource.from_database(engine)
         sources: list[AbstractFeatureSource] = [
-            WeatherFeatureSource.from_database(engine),
+            weather,
             HolidayFeatureSource(),
             CalendarFeatureSource(),
         ]
@@ -98,7 +113,7 @@ class ForecastDataProvider:
         """The next horizon_days trading days after as_of.
 
         Inside the price history these are the real trading days. Past the end
-        of the history they are business days.
+        of the history they come from TradingCalendar, which skips exchange holidays.
         """
         as_of = pd.Timestamp(as_of).normalize()
         known = self.target.index[self.target.index > as_of][: self.horizon_days]
@@ -106,8 +121,7 @@ class ForecastDataProvider:
         if missing == 0:
             return known
         start = known[-1] if len(known) else as_of
-        extra = pd.bdate_range(start + pd.Timedelta(days=1), periods=missing)
-        return known.append(extra)
+        return known.append(TradingCalendar().next_days(start, missing))
 
     def window(self, as_of: pd.Timestamp) -> ForecastWindow:
         """Training data, future features, and actuals for one as-of date."""
