@@ -150,8 +150,6 @@ def test_grid_expands_every_combination() -> None:
     configs = HyperparameterGrid({"a": [1, 2], "b": [True, False], "c": 5}).configs()
     assert len(configs) == 4
     assert {"a": 2, "b": False, "c": 5} in configs
-    joined = HyperparameterGrid([{"a": [1, 2]}, {"a": 3, "b": [True, False]}]).configs()
-    assert joined == [{"a": 1}, {"a": 2}, {"a": 3, "b": True}, {"a": 3, "b": False}]
 
 
 def test_configs_validate_and_round_trip() -> None:

@@ -32,11 +32,8 @@ class AbstractConfigWrapper(ABC):
 
     @classmethod
     @abstractmethod
-    def default_grid(cls) -> dict[str, list] | list[dict[str, list]]:
-        """Options for grid search: every combination is tried.
-
-        A list of grids tries every combination within each grid.
-        """
+    def default_grid(cls) -> dict[str, list]:
+        """Options for grid search: every combination is tried."""
 
     @classmethod
     @abstractmethod

@@ -41,16 +41,14 @@ class GradientBoostingModelConfig(AbstractConfigWrapper):
             raise ValueError(f"weekly_harmonics must be between 0 and {MAX_WEEKLY_HARMONICS}")
 
     @classmethod
-    def default_grid(cls) -> list[dict[str, list]]:
-        base = {
+    def default_grid(cls) -> dict[str, list]:
+        return {
             "n_lags": [5, 10],
             "learning_rate": [0.03, 0.1],
             "max_depth": [2, 4],
             "use_weather": [True, False],
+            "use_yearly": [True, False],
         }
-        # Calendar features all off, or all on with 1 or 2 weekly harmonics
-        calendar = {"use_yearly": True, "weekly_harmonics": [1, 2], "use_weekend": True}
-        return [base, {**base, **calendar}]
 
     @classmethod
     def default_search_space(cls) -> dict:
@@ -61,8 +59,6 @@ class GradientBoostingModelConfig(AbstractConfigWrapper):
             "min_samples_leaf": {"low": 10, "high": 100, "log": True},
             "use_weather": [True, False],
             "use_yearly": [True, False],
-            "weekly_harmonics": {"low": 0, "high": MAX_WEEKLY_HARMONICS},
-            "use_weekend": [True, False],
         }
 
     @property

@@ -14,22 +14,22 @@ Most forecasting demos stop at one model on one train and test split. This proje
 
 Prices from 2015-01-02 to 2026-11-18. 125 as-of dates every 14 days from 2021-12-31 to 2026-10-02, each forecasting the next 30 trading days (`backtest.horizon_days` in `config/tuning.yaml`). The two as-of dates after 2026-10-02 are skipped because 30 trading days of actuals do not exist yet. Same dates for every model. Best config per model, MAE, RMSE, and bias in dollars per MMBtu, MAPE and WAPE in percent.
 
-Grid search (83 configs):
+Grid search (61 configs):
 
 | Model | MAE | RMSE | MAPE | WAPE | Bias | Best config |
 | --- | --- | --- | --- | --- | --- | --- |
-| Chronos-2 | 0.5192 | 0.7975 | 13.12 | 13.65 | -0.0420 | context 512, weather, no calendar features |
-| Gradient boosting | 0.5236 | 0.8024 | 13.55 | 13.76 | 0.0132 | 5 lags, depth 2, learning rate 0.03, no weather, no calendar features |
+| Chronos-2 | 0.5192 | 0.7975 | 13.12 | 13.65 | -0.0420 | context 512, weather, yearly off |
+| Gradient boosting | 0.5212 | 0.8028 | 13.41 | 13.70 | 0.0077 | 5 lags, depth 2, learning rate 0.03, no weather, yearly on |
 | Naive | 0.5259 | 0.8107 | 13.50 | 13.82 | 0.0037 | none |
 | Greykite | 0.7362 | 1.0741 | 19.36 | 19.35 | 0.0030 | 4 years, 3 price lags, holiday dummies off |
 
-Bayesian search (19 configs, 6 trials per model):
+Bayesian search (25 configs, 8 trials per model):
 
 | Model | MAE | RMSE | MAPE | WAPE | Bias | Best config |
 | --- | --- | --- | --- | --- | --- | --- |
-| Chronos-2 | 0.5174 | 0.7905 | 13.12 | 13.60 | -0.0310 | context 640, weather, no calendar features |
+| Chronos-2 | 0.5221 | 0.7893 | 13.37 | 13.72 | -0.0273 | context 320, no weather, yearly off |
 | Naive | 0.5259 | 0.8107 | 13.50 | 13.82 | 0.0037 | none |
-| Gradient boosting | 0.5269 | 0.8133 | 13.43 | 13.85 | -0.0036 | 19 lags, depth 2, learning rate 0.014, min leaf 11, 1 weekly harmonic |
+| Gradient boosting | 0.5343 | 0.8203 | 13.72 | 14.04 | -0.0010 | 4 lags, depth 2, learning rate 0.019, min leaf 20, weather, yearly on |
 | Greykite | 0.7821 | 1.1131 | 20.68 | 20.56 | -0.0172 | 6.9 years, 1 price lag, ridge, holiday dummies off |
 
 MAE by horizon bucket, best grid config per model:
@@ -37,26 +37,26 @@ MAE by horizon bucket, best grid config per model:
 | Model | Days 1 to 5 | Days 6 to 15 | Days 16 to 30 |
 | --- | --- | --- | --- |
 | Chronos-2 | 0.2518 | 0.4628 | 0.6459 |
-| Gradient boosting | 0.2475 | 0.4624 | 0.6565 |
+| Gradient boosting | 0.2473 | 0.4594 | 0.6537 |
 | Naive | 0.2476 | 0.4656 | 0.6589 |
 | Greykite | 0.3039 | 0.6123 | 0.9629 |
 
-Calendar features (2 yearly harmonics, 1 or 2 weekly harmonics, and an after weekend flag), best config with them off and on:
+Yearly calendar features (2 Fourier harmonics of the day of year) are the only calendar option tuned. Weekly harmonics and the after weekend flag stay off. Best config with yearly off and on:
 
-| Model | Search | Off: MAE / RMSE / WAPE | On: MAE / RMSE / WAPE | Best on settings |
-| --- | --- | --- | --- | --- |
-| Chronos-2 | Grid | 0.5192 / 0.7975 / 13.65 | 0.5200 / 0.8055 / 13.67 | yearly, 2 weekly, weekend |
-| Chronos-2 | Bayesian | 0.5174 / 0.7905 / 13.60 | 0.5221 / 0.7979 / 13.72 | yearly only |
-| Gradient boosting | Grid | 0.5236 / 0.8024 / 13.76 | 0.5264 / 0.8104 / 13.84 | yearly, 1 weekly, weekend |
-| Gradient boosting | Bayesian | no trial with all off | 0.5269 / 0.8133 / 13.85 | 1 weekly only |
+| Model | Search | Off: MAE / RMSE / WAPE | On: MAE / RMSE / WAPE |
+| --- | --- | --- | --- |
+| Chronos-2 | Grid | 0.5192 / 0.7975 / 13.65 | 0.5248 / 0.8023 / 13.80 |
+| Chronos-2 | Bayesian | 0.5221 / 0.7893 / 13.72 | 0.5262 / 0.8047 / 13.83 |
+| Gradient boosting | Grid | 0.5236 / 0.8024 / 13.76 | 0.5212 / 0.8028 / 13.70 |
+| Gradient boosting | Bayesian | 0.5378 / 0.8245 / 14.14 | 0.5343 / 0.8203 / 14.04 |
 
-Chronos-2 beat naive by 1.28 percent in grid search, clearing the 1 percent margin, so the publisher registered it as `natgas-price-forecaster` version 7 (`@champion`), the same config as before the calendar features. Bayesian search would pick Chronos-2 at context 640 (1.63 percent better than naive).
+Chronos-2 beat naive by 1.28 percent in grid search, clearing the 1 percent margin, so the publisher registered it as `natgas-price-forecaster` version 8 (`@champion`), the same config as version 7. Bayesian search found Chronos-2 at context 320 without weather, only 0.74 percent better than naive, so on its own it would keep naive.
 
 What the numbers say:
 
 - Over 5 days nothing beats repeating the last price. Over 30 days Chronos-2 pulls ahead, and the gap grows with the horizon: it trails naive on days 1 to 5 and leads on days 16 to 30.
-- Chronos-2 does not need weather to win. Without it, context 512 scores MAE 0.5204, 1.05 percent better than naive, with the lowest RMSE of any config (0.7774). Weather helps a little, but backtests hand it perfect weather for all 30 days, so treat that gain as an upper bound.
-- Calendar Fourier terms did not help. In both searches the best Chronos-2 and the best grid gradient boosting leave them off. With them on, Chronos-2 gets slightly better on days 1 to 5 (0.2476 against 0.2518) but worse further out.
+- Chronos-2 does not need weather to win. Without it, context 512 scores MAE 0.5204, 1.05 percent better than naive, with a lower RMSE (0.7774) than the weather config. Weather helps a little, but backtests hand it perfect weather for all 30 days, so treat that gain as an upper bound.
+- Yearly terms help gradient boosting a little and hurt Chronos-2. In the grid they lower gradient boosting MAE in 14 of 16 matched configs (0.0046 on average) and the best drops from 0.5236 to 0.5212, now 0.90 percent better than naive, still short of the margin. For Chronos-2 they are worse in all 6 matched configs.
 - Holiday dummies did not help Greykite, and Silverkite's trend and seasonality terms drift badly past two weeks.
 
 ## How it works
@@ -124,18 +124,18 @@ if improvement >= self.min_improvement:
 | `NaiveModel` | Repeats the last price. The baseline every other model has to beat. |
 | `GradientBoostingModel` | scikit-learn gradient boosted trees on recent daily price changes, plus optional degree days and calendar features. Forecasts several days ahead by feeding each prediction back in. |
 | `GreykiteModel` | LinkedIn Greykite Silverkite: trend, seasonality, recent prices as lags, and US holiday dummies as regressors. Each holiday gets a dummy for the day itself and for up to 4 days before and after (`labor_day_pre_2`, `labor_day_post_1`). Dummies that are never 1 in the training window are left out. |
-| `ChronosModel` | Amazon Chronos-2, a pretrained time series model, used zero-shot on CPU. Degree days and calendar features can be passed as known future covariates. Tuned on context length, weather, and calendar features. |
+| `ChronosModel` | Amazon Chronos-2, a pretrained time series model, used zero-shot on CPU. Degree days and calendar features can be passed as known future covariates. Tuned on context length, weather, and the yearly terms. |
 
 ### Data, backtests, search, and publishing
 
 | Class | Job |
 | --- | --- |
 | `ForecastDataProvider` | Give it an as-of date and it returns a `ForecastWindow`: training data on or before that date, feature values for the dates to predict, and the actual prices used to score the forecast. |
-| `AbstractFeatureSource` | Base class for extra data. Each source returns only what was known on the as-of date. `WeatherFeatureSource` adds heating and cooling degree days. `HolidayFeatureSource` adds US holiday dummies from the `holidays` package, which are known in advance and so are valid for the forecast dates. `CalendarFeatureSource` adds Fourier terms for the time of year (2 harmonics) and day of week (1 or 2 harmonics) and an `after_weekend` flag for the first weekday after a weekend; these depend only on the date. `StorageFeatureSource` adds the EIA storage level once each weekly report is published. |
+| `AbstractFeatureSource` | Base class for extra data. Each source returns only what was known on the as-of date. `WeatherFeatureSource` adds heating and cooling degree days. `HolidayFeatureSource` adds US holiday dummies from the `holidays` package, which are known in advance and so are valid for the forecast dates. `CalendarFeatureSource` adds Fourier terms for the time of year (2 harmonics) and day of week (1 or 2 harmonics) and an `after_weekend` flag for the first weekday after a weekend; these depend only on the date. Only the yearly terms are tuned. `StorageFeatureSource` adds the EIA storage level once each weekly report is published. |
 | `Backtester` | For each as-of date gets the window, checks for leakage, trains a fresh model, predicts, and records a `BacktestResult`. Runs dates in parallel with `n_jobs`. |
 | `BacktestReport`, `ForecastMetrics` | Score one config: MAE, RMSE, MAPE, WAPE, and bias, overall, by days ahead, and by horizon bucket (days 1 to 5, 6 to 15, 16 to 30). |
 | `AbstractOptimizer` | Backtests candidate configs, logs each one as a nested MLflow run, skips repeats, records failures without stopping, and builds the results table with skill against naive. |
-| `GridSearchOptimizer`, `BayesianOptimizer` | Every combination in the grid, or Optuna's TPE sampler picking each next config from the ones already scored. A grid can be a list of grids, which tries every combination within each one, for example calendar features all off or all on. |
+| `GridSearchOptimizer`, `BayesianOptimizer` | Every combination in the grid, or Optuna's TPE sampler picking each next config from the ones already scored. |
 | `ModelPublisher` | Publishes the best config only if it lowers error by at least `min_improvement` against naive (1 percent by default). The chosen config is retrained on all data, logged as an MLflow pyfunc model, registered, and given the `champion` alias. |
 | `TuningPipeline` | Runs all of the above from `tuning.yaml`. `natgas tune` calls it. |
 
@@ -184,7 +184,7 @@ model = mlflow.pyfunc.load_model("models:/natgas-price-forecaster@champion")
 model.predict(future_dates_frame)  # columns: date plus the features the model uses
 ```
 
-On an 8 core CPU the grid notebook takes about 40 minutes and the Bayesian notebook about 34, most of it Greykite.
+On an 8 core CPU the grid notebook takes about 25 minutes and the Bayesian notebook about 40, most of it Greykite.
 
 ## Spark
 

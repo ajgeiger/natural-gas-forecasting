@@ -16,9 +16,9 @@ class GridSearchOptimizer(AbstractOptimizer):
     method_name = "grid"
     space_key = "grid"
 
-    def default_space(self, config_class: type[AbstractConfigWrapper]) -> dict | list[dict]:
+    def default_space(self, config_class: type[AbstractConfigWrapper]) -> dict:
         return config_class.default_grid()
 
-    def search(self, config_class: type[AbstractConfigWrapper], space: dict | list[dict]) -> None:
+    def search(self, config_class: type[AbstractConfigWrapper], space: dict) -> None:
         for values in HyperparameterGrid(space).configs():
             self.evaluate(config_class.from_dict(values))

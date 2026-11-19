@@ -47,11 +47,12 @@ class ChronosModelConfig(AbstractConfigWrapper):
             raise ValueError(f"weekly_harmonics must be between 0 and {MAX_WEEKLY_HARMONICS}")
 
     @classmethod
-    def default_grid(cls) -> list[dict[str, list]]:
-        base = {"context_length": [128, 512, 2048], "use_weather": [True, False]}
-        # Calendar features all off, or all on with 1 or 2 weekly harmonics
-        calendar = {"use_yearly": True, "weekly_harmonics": [1, 2], "use_weekend": True}
-        return [base, {**base, **calendar}]
+    def default_grid(cls) -> dict[str, list]:
+        return {
+            "context_length": [128, 512, 2048],
+            "use_weather": [True, False],
+            "use_yearly": [True, False],
+        }
 
     @classmethod
     def default_search_space(cls) -> dict:
@@ -59,8 +60,6 @@ class ChronosModelConfig(AbstractConfigWrapper):
             "context_length": {"low": 64, "high": 2048, "step": 64},
             "use_weather": [True, False],
             "use_yearly": [True, False],
-            "weekly_harmonics": {"low": 0, "high": MAX_WEEKLY_HARMONICS},
-            "use_weekend": [True, False],
         }
 
     @property

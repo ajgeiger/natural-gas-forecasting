@@ -40,16 +40,14 @@ class AbstractOptimizer(ABC):
         self.attempts = 0
 
     @abstractmethod
-    def default_space(self, config_class: type[AbstractConfigWrapper]) -> dict | list[dict]:
+    def default_space(self, config_class: type[AbstractConfigWrapper]) -> dict:
         """The config class's own grid or search space."""
 
     @abstractmethod
-    def search(self, config_class: type[AbstractConfigWrapper], space: dict | list[dict]) -> None:
+    def search(self, config_class: type[AbstractConfigWrapper], space: dict) -> None:
         """Pick configs from the space and score each one with evaluate()."""
 
-    def space_for(
-        self, config_class: type[AbstractConfigWrapper], settings: dict
-    ) -> dict | list[dict]:
+    def space_for(self, config_class: type[AbstractConfigWrapper], settings: dict) -> dict:
         """Space from tuning.yaml if given, otherwise the config class default."""
         space = settings.get(self.space_key)
         return space if space is not None else self.default_space(config_class)
