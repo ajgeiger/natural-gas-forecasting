@@ -1,31 +1,143 @@
 # natural-gas-forecasting
 
-Daily forecasts of the natural gas front-month futures price (Yahoo Finance `NG=F`, daily high), using EIA weekly storage and weather in major gas-demand cities as inputs.
+**Start here: [grid search backtest notebook](experiments/grid_search_backtest.ipynb).** It runs every model on the same 127 rolling as-of dates, scores them, and publishes the winner to the MLflow model registry. The [Bayesian search notebook](experiments/bayesian_backtest.ipynb) repeats the search with Optuna.
 
-The goal is a small system that runs on its own: pull fresh data each day, keep several models in play, use the most accurate approved one for the published forecast, and track accuracy as actual prices come in.
+Daily forecasts of the natural gas front-month futures price (Yahoo Finance `NG=F`, daily high), using weather in major gas-demand cities and EIA weekly storage as inputs.
 
-## Roadmap
+## Why it matters
 
-- [x] Database and data loaders for prices, weather, and storage
-- [x] Spark access to the database over JDBC
-- [ ] Data checks for stale, missing, and duplicate data
-- [x] Shared model interface (train, predict, save, load) with a config class per model
-- [x] Naive, gradient boosting, Greykite, and Chronos models on the same interface
-- [ ] ARIMA and Chronos-2 models
-- [x] Rolling-origin backtests and a scoreboard (MAE, RMSE, MAPE, WAPE, bias)
-- [x] Grid and Bayesian search logged to MLflow, winner registered as `champion` only if it beats naive
-- [ ] Model stages: Testing, Challenger, Champion, Legacy Champion
-- [ ] Daily forecast and weekly retrain jobs in GitHub Actions
-- [ ] Streamlit dashboard
+Natural gas is one of the most volatile commodities there is. Utilities, power plants, and industrial buyers plan purchases days ahead, and a few cents per MMBtu on millions of MMBtu is real money. Weather drives demand, storage shows how tight supply is, and the futures price reacts to both.
+
+Most forecasting demos stop at one model on one train and test split. This project is built the way a production team would want it: every model is backtested on the same dates with no look-ahead, every run is logged, and a model only replaces the baseline when it earns it.
+
+## What it shows
+
+Prices from 2015-01-02 to 2026-11-18. 127 as-of dates every 14 days from 2021-12-31 to 2026-10-30, each forecasting the next 5 trading days. Same dates for every model. Best config per model, MAE, RMSE, and bias in dollars per MMBtu, MAPE and WAPE in percent.
+
+Grid search (31 configs):
+
+| Model | MAE | RMSE | MAPE | WAPE | Bias | Best config |
+| --- | --- | --- | --- | --- | --- | --- |
+| Gradient boosting | 0.2462 | 0.3885 | 6.19 | 6.49 | -0.0011 | 5 lags, depth 2, learning rate 0.03, no weather |
+| Naive | 0.2462 | 0.3828 | 6.16 | 6.49 | 0.0001 | none |
+| Chronos-2 | 0.2482 | 0.3874 | 6.18 | 6.54 | -0.0098 | context 512, no weather |
+| Greykite | 0.3035 | 0.4504 | 7.89 | 8.00 | 0.0146 | 4 years of history, 3 price lags, no weather |
+
+Bayesian search (19 configs, 6 trials per model):
+
+| Model | MAE | RMSE | MAPE | WAPE | Bias | Best config |
+| --- | --- | --- | --- | --- | --- | --- |
+| Naive | 0.2462 | 0.3828 | 6.16 | 6.49 | 0.0001 | none |
+| Gradient boosting | 0.2481 | 0.3893 | 6.21 | 6.53 | -0.0049 | 13 lags, depth 2, learning rate 0.018, min leaf 89, weather |
+| Chronos-2 | 0.2490 | 0.3903 | 6.23 | 6.56 | -0.0145 | context 1472, no weather |
+| Greykite | 0.3198 | 0.4716 | 8.28 | 8.42 | -0.0035 | 4.7 years, 4 price lags, changepoints, ridge |
+
+Nothing beat naive by the 1 percent margin, so the publisher kept naive and registered it as `natgas-price-forecaster` version 3 (`@champion`). That is the expected result for a liquid futures price over a few days, and it is why the publishing rule exists.
+
+What the numbers say:
+
+- Chronos-2 lands within 1 percent of naive in grid search (MAE 0.2482 against 0.2462) with no training at all.
+- Weather as a known future covariate did not help Chronos-2 at this horizon. The best Chronos-2 configs in both searches leave it off. Backtests use observed weather as a perfect forecast, so live results with real weather forecasts would not be better.
+- Silverkite is built for series with strong trend and seasonality, which day to day futures prices do not have.
+
+## How it works
+
+```mermaid
+flowchart LR
+    yaml[config/tuning.yaml] --> configs[model config classes]
+    configs --> optimizer[GridSearchOptimizer or BayesianOptimizer]
+    provider[ForecastDataProvider] --> backtester[Backtester]
+    optimizer --> backtester
+    backtester --> mlflow[MLflow experiment]
+    optimizer --> publisher[ModelPublisher]
+    publisher --> registry[MLflow model registry]
+```
+
+Every model subclasses `AbstractModelWrapper` (`train`, `predict`, `save`, `load`) and takes a config class that subclasses `AbstractConfigWrapper` (defaults, validation, grid, search space, and what the backtester needs). The backtester, optimizers, and publisher work with any of them.
+
+### Code highlights
+
+`ForecastDataProvider` is the only way a model gets data. It hands out a `ForecastWindow` per as-of date, and `Backtester` refuses to run a window that leaks:
+
+```python
+@staticmethod
+def check_no_leakage(
+    as_of: pd.Timestamp, training_data: pd.DataFrame, forecast_dates: pd.DatetimeIndex
+) -> None:
+    """Stop the run if any training row is after the as-of date."""
+    if training_data.index.max() > as_of:
+        raise AssertionError(f"Training data goes past the as-of date {as_of.date()}")
+    if forecast_dates.min() <= as_of:
+        raise AssertionError(f"Forecast dates must start after {as_of.date()}")
+```
+
+`ChronosModel` runs Amazon Chronos-2 zero-shot. The context is prices up to the as-of date, and degree days for the forecast dates go in as known future covariates:
+
+```python
+forecast = pipeline.predict_df(
+    self.context_frame(),
+    future_df=self.future_covariates(future_features, future_calendar),
+    prediction_length=len(future_calendar),
+    quantile_levels=[0.5],
+    id_column=ID_COLUMN,
+    timestamp_column=TIME_COLUMN,
+    target=TARGET_COLUMN,
+    context_length=self.config.context_length,
+    freq="B",
+)
+```
+
+`ModelPublisher` only replaces naive when the winner clears the margin:
+
+```python
+improvement = 1 - best.metrics()[metric] / baseline.metrics()[metric]
+if best.model_name == BASELINE_MODEL:
+    return PublishDecision(baseline, "naive had the lowest error", 0.0)
+if improvement >= self.min_improvement:
+    reason = f"{best.model_name} beat naive by {improvement:.2%}"
+    return PublishDecision(best, reason, improvement)
+```
+
+### Models
+
+| Model | What it does |
+| --- | --- |
+| `NaiveModel` | Repeats the last price. The baseline every other model has to beat. |
+| `GradientBoostingModel` | scikit-learn gradient boosted trees on recent daily price changes, plus degree days. Forecasts several days ahead by feeding each prediction back in. |
+| `GreykiteModel` | LinkedIn Greykite Silverkite: trend, seasonality, recent prices as lags, and degree days as regressors for the forecast dates. |
+| `ChronosModel` | Amazon Chronos-2, a pretrained time series model, used zero-shot on CPU. Heating and cooling degree days can be passed as known future covariates. Tuned on context length and weather on or off. |
+
+### Data, backtests, search, and publishing
+
+| Class | Job |
+| --- | --- |
+| `ForecastDataProvider` | Give it an as-of date and it returns a `ForecastWindow`: training data on or before that date, feature values for the dates to predict, and the actual prices used to score the forecast. |
+| `AbstractFeatureSource` | Base class for extra data. Each source returns only what was known on the as-of date. `WeatherFeatureSource` adds heating and cooling degree days. `StorageFeatureSource` adds the EIA storage level once each weekly report is published. |
+| `Backtester` | For each as-of date gets the window, checks for leakage, trains a fresh model, predicts, and records a `BacktestResult`. Runs dates in parallel with `n_jobs`. |
+| `BacktestReport`, `ForecastMetrics` | Score one config: MAE, RMSE, MAPE, WAPE, and bias, overall and by days ahead. |
+| `AbstractOptimizer` | Backtests candidate configs, logs each one as a nested MLflow run, skips repeats, records failures without stopping, and builds the results table with skill against naive. |
+| `GridSearchOptimizer`, `BayesianOptimizer` | Every combination in the grid, or Optuna's TPE sampler picking each next config from the ones already scored. |
+| `ModelPublisher` | Publishes the best config only if it lowers error by at least `min_improvement` against naive (1 percent by default). The chosen config is retrained on all data, logged as an MLflow pyfunc model, registered, and given the `champion` alias. |
+| `TuningPipeline` | Runs all of the above from `tuning.yaml`. `natgas tune` calls it. |
+
+To add a model, create a folder under `models/` with a config class and a model class, add the pair to `ModelCatalog`, and give it a grid and search space in `tuning.yaml`. Nothing else changes.
+
+### No look-ahead
+
+- Training data always ends on the as-of date, and the test period starts the next trading day. The backtester checks this on every window.
+- Storage values only appear once EIA would have published them (6 days after the week ends).
+- Weather for future dates would come from the forecast made on the as-of date. Past forecasts are not stored, so backtests use the observed weather as a perfect forecast. This makes weather models look slightly better than they will live. Pass `use_observed_as_forecast=False` to `WeatherFeatureSource` to hide future weather instead.
 
 ## Quickstart
 
-Requires Python 3.10 (Greykite does not support newer versions yet).
+Requires Python 3.10 (Greykite does not support newer versions yet). Greykite 1.1 pins pandas below 2.0, numpy 1.26.0, and scikit-learn 1.3.1. Chronos-2's package metadata asks for pandas 2, but the forecast API used here works with pandas 1.5, so it is installed in a second step that leaves pandas alone. Install the CPU build of PyTorch first on a machine without a GPU.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install -e ".[dev]"
+pip install "chronos-forecasting>=2.0" --no-deps
 
 export EIA_API_KEY=your_key   # optional, storage is skipped without it
 natgas init-db
@@ -33,15 +145,27 @@ natgas ingest all             # 2015-01-01 through today by default
 natgas tune                   # backtest, log to MLflow, register the best model
 ```
 
-Each source can also be loaded on its own:
+More commands:
 
 ```bash
 natgas ingest prices --start 2024-01-01 --end 2024-06-30
-natgas ingest weather
-natgas ingest storage
+natgas tune --optimizer bayesian     # Bayesian search instead of grid
+natgas tune --no-publish             # backtest and log only
+mlflow ui --backend-store-uri sqlite:///mlflow.db
+make lint && make test
 ```
 
-Loaders upsert on each table's key, so reruns do not create duplicates. Every run is logged to the `ingestion_runs` table.
+Loaders upsert on each table's key, so reruns do not create duplicates. Every run is logged to the `ingestion_runs` table. Run commands from the repo root: MLflow runs go to `mlflow.db` with artifacts in `mlruns/`, both git ignored. Chronos-2 weights are downloaded from Hugging Face the first time and cached; only the model id is saved with a published model. Load the champion anywhere with:
+
+```python
+import mlflow
+
+mlflow.set_tracking_uri("sqlite:///mlflow.db")
+model = mlflow.pyfunc.load_model("models:/natgas-price-forecaster@champion")
+model.predict(future_dates_frame)  # columns: date, hdd, cdd
+```
+
+The two notebooks take about 7 minutes each on an 8 core CPU, most of it Chronos-2.
 
 ## Spark
 
@@ -69,116 +193,7 @@ database.write_table(prices.select("date", "high"), "prices_high", mode="overwri
 
 The Spark tests skip when pyspark or Java is not installed.
 
-Run `make lint` and `make test` before opening a PR.
 
-## Forecasting framework
-
-The forecasting code lives in `src/natgas/forecasting/`. Every model is configured, trained, backtested, and published the same way, which makes models easy to compare and hard to cheat.
-
-Experiments: [grid search](experiments/grid_search_backtest.ipynb) and [Bayesian search](experiments/bayesian_backtest.ipynb) notebooks run every model on the same dates and metrics.
-
-```mermaid
-flowchart LR
-    yaml[config/tuning.yaml] --> configs[model config classes]
-    configs --> optimizer[GridSearchOptimizer or BayesianOptimizer]
-    provider[ForecastDataProvider] --> backtester[Backtester]
-    optimizer --> backtester
-    backtester --> mlflow[MLflow experiment]
-    optimizer --> publisher[ModelPublisher]
-    publisher --> registry[MLflow model registry]
-```
-
-### Models
-
-| Model | What it does |
-| --- | --- |
-| `NaiveModel` | Repeats the last price. The baseline every other model has to beat. |
-| `GradientBoostingModel` | scikit-learn gradient boosted trees on recent daily price changes, plus degree days. Forecasts several days ahead by feeding each prediction back in. |
-| `GreykiteModel` | LinkedIn Greykite Silverkite: trend, seasonality, recent prices as lags, and degree days as regressors for the forecast dates. |
-| `ChronosModel` | Amazon Chronos, a pretrained time series model, used zero-shot on CPU. Choose the model size, context length, and median, mean, or quantile output. |
-
-Each model has a matching config class (`NaiveModelConfig`, `GradientBoostingModelConfig`, `GreykiteModelConfig`, `ChronosModelConfig`). All of them follow `AbstractConfigWrapper`, which defines:
-
-- defaults and validation for every hyperparameter
-- the default grid for grid search and the default search space for Bayesian search
-- `to_dict` and `from_dict` for YAML and MLflow params
-- what the backtester needs: required feature columns, the longest horizon, and the least history the model can train on
-
-Every model subclasses `AbstractModelWrapper` and takes its config in the constructor: `train`, `predict`, `save`, `load`. `ModelCatalog` maps a name in `tuning.yaml` to its (model class, config class) pair.
-
-### Data and backtests
-
-| Class | Job |
-| --- | --- |
-| `ForecastDataProvider` | The only way models get data. Give it an as-of date and it returns a `ForecastWindow`: training data on or before that date, feature values for the dates to predict, and the actual prices used to score the forecast. |
-| `AbstractFeatureSource` | Base class for extra data. Each source returns only what was known on the as-of date. `WeatherFeatureSource` adds heating and cooling degree days. `StorageFeatureSource` adds the EIA storage level once each weekly report is published. |
-| `Backtester` | Checks the config against the provider, then for each as-of date gets the window, checks for leakage, trains a fresh model, predicts, and records a `BacktestResult`. Runs dates in parallel with `n_jobs`. |
-| `BacktestReport`, `ForecastMetrics` | Collect the results for one config and score them: MAE, RMSE, MAPE, WAPE, and bias, overall and by days ahead. |
-
-### Search (`optimization/`) and publishing (`tuning/`)
-
-| Class | Job |
-| --- | --- |
-| `AbstractOptimizer` | Backtests candidate configs, logs each one as a nested MLflow run, skips repeats, records failures without stopping, and builds the results table with skill against naive. |
-| `GridSearchOptimizer` | Tries every combination in each model's grid. |
-| `BayesianOptimizer` | Uses Optuna's TPE sampler to pick each next config from the ones already scored. |
-| `OptimizerCatalog` | Builds the optimizer named in `tuning.yaml` (`search.optimizer: grid` or `bayesian`). |
-| `ModelPublisher` | Publishes the best config only if it lowers error by at least `min_improvement` against naive (1 percent by default). Otherwise it publishes naive. The chosen config is retrained on all data, logged as an MLflow pyfunc model, registered, and given the `champion` alias. |
-| `TuningPipeline` | Runs all of the above from `tuning.yaml`. `natgas tune` calls it. |
-
-### No look-ahead
-
-- Training data always ends on the as-of date, and the test period starts the next trading day. The backtester checks this on every window and stops if it is broken.
-- Storage values only appear once EIA would have published them (6 days after the week ends).
-- Weather for future dates would come from the forecast made on the as-of date. Past forecasts are not stored, so backtests use the observed weather as a perfect forecast. This makes weather models look slightly better than they will live. Pass `use_observed_as_forecast=False` to `WeatherFeatureSource` to hide future weather instead.
-
-### Run it
-
-```bash
-natgas ingest all
-natgas tune                          # grid search from config/tuning.yaml
-natgas tune --optimizer bayesian     # Bayesian search instead
-natgas tune --no-publish             # backtest and log only
-mlflow ui --backend-store-uri sqlite:///mlflow.db
-```
-
-Run these from the repo root. MLflow runs are stored in `mlflow.db` with artifacts in `mlruns/`; both are git ignored. Load the published model anywhere with:
-
-```python
-import mlflow
-
-mlflow.set_tracking_uri("sqlite:///mlflow.db")
-model = mlflow.pyfunc.load_model("models:/natgas-price-forecaster@champion")
-model.predict(future_dates_frame)  # columns: date, hdd, cdd
-```
-
-Chronos weights are downloaded from Hugging Face the first time and cached. Only the model id is saved with a published Chronos model.
-
-### Installing
-
-Greykite 1.1 pins pandas below 2.0, numpy 1.26.0, and scikit-learn 1.3.1, so the project uses those versions. On a machine without a GPU, install the CPU build of PyTorch first to save a large download:
-
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -e ".[dev]"
-```
-
-### Adding a model
-
-Create a folder under `models/` with a config class (subclass `AbstractConfigWrapper`) and a model class (subclass `AbstractModelWrapper`), add the pair to `ModelCatalog`, and give it a grid and search space in `tuning.yaml`. The backtester, optimizers, and publisher need no changes.
-
-### Results
-
-Prices from 2015 through 2026-11-18. 127 as-of dates every 14 days from 2021-12-31 to 2026-10-30, each forecasting the next 5 trading days. Best config per model, MAE in dollars per MMBtu:
-
-| Model | Grid search MAE | Grid RMSE | Grid WAPE | Bayesian MAE | Best grid config |
-| --- | --- | --- | --- | --- | --- |
-| Gradient boosting | 0.2462 | 0.3885 | 6.49% | 0.2481 | 5 lags, depth 2, learning rate 0.03, no weather |
-| Naive | 0.2462 | 0.3828 | 6.49% | 0.2462 | none |
-| Chronos | 0.2525 | 0.3927 | 6.65% | 0.2556 | chronos-bolt-base, context 128, median |
-| Greykite | 0.3035 | 0.4504 | 8.00% | 0.3198 | 4 years of history, 3 price lags, no weather |
-
-Grid search tried 31 configs and Bayesian search 18, on the same dates. Nothing beat naive by the 1 percent margin, so the publisher kept naive and registered it as `natgas-price-forecaster` version 1 (`@champion`). This is the expected result for a liquid futures price over a few days, and it is why the publishing rule exists: a fancier model has to earn its place. Chronos comes close zero-shot with no training at all. Silverkite is built for series with strong trend and seasonality, which day to day futures prices do not have.
 ## Configuration
 
 Settings live in `config/settings.yaml` (ticker, storage series, cities, degree day base). Environment variables:
@@ -188,14 +203,6 @@ Settings live in `config/settings.yaml` (ticker, storage series, cities, degree 
 | `NATGAS_DB_URL` | SQLAlchemy URL. Defaults to `sqlite:///data/natgas.db`; a Postgres URL works too |
 | `EIA_API_KEY` | Needed for storage data |
 | `NATGAS_CONFIG` | Path to a different settings file |
-
-## Data sources
-
-| Data | Source | Notes |
-| --- | --- | --- |
-| Futures prices | [Yahoo Finance](https://finance.yahoo.com/quote/NG=F/) via [yfinance](https://github.com/ranaroussi/yfinance) | Daily OHLCV for `NG=F` |
-| Weather | [Open-Meteo](https://open-meteo.com/) archive and forecast APIs | Daily mean temperature, converted to heating and cooling degree days (base 65F) for 8 cities. No key needed |
-| Storage | [EIA API v2](https://www.eia.gov/opendata/) | Weekly Lower 48 working gas in storage, series `NW2_EPG0_SWO_R48_BCF`. [Free key](https://www.eia.gov/opendata/register.php) |
 
 ## Architecture
 
@@ -249,3 +256,32 @@ experiments/            grid search and Bayesian search notebooks
 src/natgas/cli.py       natgas command
 tests/                  pytest, no network calls
 ```
+
+## Roadmap
+
+- [x] Database and data loaders for prices, weather, and storage
+- [x] Spark access to the database over JDBC
+- [ ] Data checks for stale, missing, and duplicate data
+- [x] Shared model interface (train, predict, save, load) with a config class per model
+- [x] Naive, gradient boosting, Greykite, and Chronos-2 models on the same interface
+- [ ] ARIMA models
+- [x] Rolling-origin backtests and a scoreboard (MAE, RMSE, MAPE, WAPE, bias)
+- [x] Grid and Bayesian search logged to MLflow, winner registered as `champion` only if it beats naive
+- [ ] Model stages: Testing, Challenger, Champion, Legacy Champion
+- [ ] Daily forecast and weekly retrain jobs in GitHub Actions
+- [ ] Streamlit dashboard
+
+## Sources
+
+Data:
+
+- Futures prices: [Yahoo Finance `NG=F`](https://finance.yahoo.com/quote/NG=F/) via [yfinance](https://github.com/ranaroussi/yfinance), daily OHLCV
+- Weather: [Open-Meteo](https://open-meteo.com/) archive and forecast APIs, daily mean temperature converted to heating and cooling degree days (base 65F) for 8 cities, no key needed
+- Storage: [EIA API v2](https://www.eia.gov/opendata/), weekly Lower 48 working gas in storage, series `NW2_EPG0_SWO_R48_BCF`, [free key](https://www.eia.gov/opendata/register.php)
+
+Models and tools:
+
+- [Chronos-2: From Univariate to Universal Forecasting](https://arxiv.org/abs/2510.15821) and the [`amazon/chronos-2`](https://huggingface.co/amazon/chronos-2) model card
+- [Greykite](https://github.com/linkedin/greykite) (Silverkite)
+- [scikit-learn HistGradientBoostingRegressor](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.HistGradientBoostingRegressor.html)
+- [Optuna](https://optuna.org/) and [MLflow](https://mlflow.org/)

@@ -1,4 +1,4 @@
-"""Amazon Chronos zero-shot forecasts."""
+"""Amazon Chronos-2 zero-shot forecasts, with optional weather covariates."""
 
 from __future__ import annotations
 
@@ -7,77 +7,115 @@ from typing import ClassVar
 
 import pandas as pd
 import torch
-from chronos import BaseChronosPipeline, ChronosPipeline
+from chronos import Chronos2Pipeline
 
 from natgas.forecasting.models.base.AbstractModelWrapper import AbstractModelWrapper
 from natgas.forecasting.models.chronos.ChronosModelConfig import ChronosModelConfig
 
 CONTEXT_FILE = "context.csv"
+SERIES_ID = "ng"
+TIME_COLUMN = "timestamp"
+TARGET_COLUMN = "target"
+ID_COLUMN = "id"
 
 
 class ChronosModel(AbstractModelWrapper):
-    """Pretrained time series model from Amazon, used without any fine tuning.
+    """Pretrained Chronos-2 model from Amazon, used without any fine tuning.
 
-    train() just keeps the last context_length prices. predict() hands them to
-    Chronos and returns the median, mean, or a chosen quantile for each date.
-    Chronos only reads the price history, so weather is not used.
+    train() keeps the last context_length prices, and weather when that is
+    enabled, on a business day calendar. predict() hands them to Chronos-2.
+    When use_weather is on, heating and cooling degree days are passed as
+    known future covariates for the forecast dates.
 
     The model weights are downloaded from Hugging Face once and cached. They
     are not saved with the model folder, only the model id is.
     """
 
     config_class = ChronosModelConfig
-    pipelines: ClassVar[dict[str, BaseChronosPipeline]] = {}
+    pipelines: ClassVar[dict[str, Chronos2Pipeline]] = {}
 
     def __init__(self, config: ChronosModelConfig | None = None) -> None:
         super().__init__(config)
-        self.context: pd.Series | None = None
+        self.context: pd.DataFrame | None = None
 
     @classmethod
-    def pipeline_for(cls, model_id: str, device: str) -> BaseChronosPipeline:
-        """Load each Chronos model once per process and reuse it."""
+    def pipeline_for(cls, model_id: str, device: str) -> Chronos2Pipeline:
+        """Load Chronos-2 once per process and reuse it."""
         key = f"{model_id}@{device}"
         if key not in cls.pipelines:
-            cls.pipelines[key] = BaseChronosPipeline.from_pretrained(
-                model_id, device_map=device, dtype=torch.float32
-            )
+            # Prefer the local cache so parallel backtest workers do not
+            # contact Hugging Face on every process start.
+            options = {"device_map": device, "dtype": torch.float32}
+            try:
+                cls.pipelines[key] = Chronos2Pipeline.from_pretrained(
+                    model_id, local_files_only=True, **options
+                )
+            except OSError:
+                cls.pipelines[key] = Chronos2Pipeline.from_pretrained(model_id, **options)
         return cls.pipelines[key]
 
     def train(self, training_data: pd.DataFrame) -> None:
-        self.context = training_data["price"].dropna().iloc[-self.config.context_length :]
+        columns = ["price", *self.config.required_features]
+        history = training_data[columns].dropna(subset=["price"])
+        # Chronos-2 needs a regular time grid, so holidays carry the previous
+        # price and weather forward, the same way Greykite does.
+        calendar = pd.bdate_range(history.index[0], history.index[-1])
+        history = history.reindex(calendar).ffill()
+        for column in self.config.required_features:
+            history[column] = history[column].bfill()
+        self.context = history.iloc[-self.config.context_length :]
         self.is_trained = True
 
     def predict(self, future_features: pd.DataFrame) -> pd.Series:
         self.check_trained()
         pipeline = self.pipeline_for(self.config.model_id, self.config.device)
-        context = torch.tensor(self.context.to_numpy(), dtype=torch.float32)
-        options = {}
-        if isinstance(pipeline, ChronosPipeline):
-            options["num_samples"] = self.config.num_samples
+        future_calendar = pd.bdate_range(
+            self.context.index[-1] + pd.Timedelta(days=1), future_features.index.max()
+        )
+        forecast = pipeline.predict_df(
+            self.context_frame(),
+            future_df=self.future_covariates(future_features, future_calendar),
+            prediction_length=len(future_calendar),
+            quantile_levels=[0.5],
+            id_column=ID_COLUMN,
+            timestamp_column=TIME_COLUMN,
+            target=TARGET_COLUMN,
+            context_length=self.config.context_length,
+            freq="B",
+        )
+        # The median is the point forecast. Chronos-2 also returns it as "predictions".
+        values = forecast["0.5"].to_numpy()
+        dates = pd.DatetimeIndex(forecast[TIME_COLUMN])
+        return pd.Series(values, index=dates, name="prediction").reindex(future_features.index)
 
-        # t5 models draw random sample paths, a fixed seed makes backtests repeatable
-        torch.manual_seed(self.config.seed)
-        level = 0.5 if self.config.point_forecast == "median" else self.config.quantile_level
-        with torch.no_grad():
-            quantiles, mean = pipeline.predict_quantiles(
-                context,
-                prediction_length=len(future_features),
-                quantile_levels=[level],
-                **options,
-            )
-        values = mean[0] if self.config.point_forecast == "mean" else quantiles[0, :, 0]
-        return pd.Series(values.numpy(), index=future_features.index, name="prediction")
+    def context_frame(self) -> pd.DataFrame:
+        frame = self.context.rename_axis(TIME_COLUMN).reset_index()
+        frame = frame.rename(columns={"price": TARGET_COLUMN})
+        frame.insert(0, ID_COLUMN, SERIES_ID)
+        return frame
+
+    def future_covariates(
+        self, future_features: pd.DataFrame, future_calendar: pd.DatetimeIndex
+    ) -> pd.DataFrame | None:
+        if not self.config.required_features:
+            return None
+        future = pd.DataFrame(index=future_calendar)
+        for column in self.config.required_features:
+            values = future_features[column].reindex(future_calendar).ffill().bfill()
+            future[column] = values.fillna(self.context[column].iloc[-1])
+        future = future.rename_axis(TIME_COLUMN).reset_index()
+        future.insert(0, ID_COLUMN, SERIES_ID)
+        return future
 
     def save(self, folder: str | Path) -> None:
         self.check_trained()
         folder = self.write_settings(folder)
-        self.context.rename("price").to_csv(folder / CONTEXT_FILE, index_label="date")
+        self.context.to_csv(folder / CONTEXT_FILE, index_label="date")
 
     @classmethod
     def load(cls, folder: str | Path) -> ChronosModel:
         folder = Path(folder)
         model = cls(cls.config_from_folder(folder))
-        context = pd.read_csv(folder / CONTEXT_FILE, parse_dates=["date"], index_col="date")
-        model.context = context["price"]
+        model.context = pd.read_csv(folder / CONTEXT_FILE, parse_dates=["date"], index_col="date")
         model.is_trained = True
         return model

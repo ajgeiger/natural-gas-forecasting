@@ -1,5 +1,6 @@
 install:
 	pip install -e ".[dev]"
+	pip install "chronos-forecasting>=2.0" --no-deps
 
 lint:
 	ruff check .

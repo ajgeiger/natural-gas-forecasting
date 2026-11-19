@@ -1,91 +1,61 @@
-"""Settings for Amazon Chronos, a pretrained forecasting model."""
+"""Settings for Amazon Chronos-2, a pretrained forecasting model."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from natgas.forecasting.models.base.AbstractConfigWrapper import AbstractConfigWrapper
 
-POINT_FORECASTS = ["median", "mean", "quantile"]
-MODEL_IDS = [
-    "amazon/chronos-bolt-tiny",
-    "amazon/chronos-bolt-mini",
-    "amazon/chronos-bolt-small",
-    "amazon/chronos-bolt-base",
-    "amazon/chronos-t5-tiny",
-    "amazon/chronos-t5-mini",
-    "amazon/chronos-t5-small",
-]
+MIN_CONTEXT = 16
+MAX_CONTEXT = 8192
+MAX_HORIZON = 1024
 
 
 @dataclass(frozen=True)
 class ChronosModelConfig(AbstractConfigWrapper):
-    """Chronos is used zero-shot: no training, it reads recent prices and forecasts.
+    """Chronos-2 is used zero-shot: no training, it reads recent prices and forecasts.
 
-    model_id        Hugging Face model, bolt models are much faster on CPU
-    context_length  how many recent prices the model reads
-    num_samples     sample paths per forecast, only used by the t5 models
-    point_forecast  median, mean, or a chosen quantile of the forecast
-    quantile_level  which quantile to use when point_forecast is "quantile"
-    seed            fixes the random sample paths of t5 models so runs repeat
+    model_id        Hugging Face model, a Chronos-2 checkpoint
+    context_length  how many recent business days the model reads, up to 8192
+    use_weather     pass heating and cooling degree days as known future covariates
     """
 
     model_name = "chronos"
 
-    model_id: str = "amazon/chronos-bolt-small"
+    model_id: str = "amazon/chronos-2"
     context_length: int = 512
-    num_samples: int = 20
-    point_forecast: str = "median"
-    quantile_level: float = 0.5
+    use_weather: bool = True
+    weather_columns: list[str] = field(default_factory=lambda: ["hdd", "cdd"])
     device: str = "cpu"
-    seed: int = 42
 
     def validate(self) -> None:
-        if self.model_id not in MODEL_IDS:
-            raise ValueError(f"model_id must be one of {MODEL_IDS}")
-        if self.context_length < 16:
-            raise ValueError("context_length must be at least 16")
-        if self.is_t5 and self.context_length > 512:
-            raise ValueError("t5 models read at most 512 values")
-        if self.num_samples < 1:
-            raise ValueError("num_samples must be at least 1")
-        if self.point_forecast not in POINT_FORECASTS:
-            raise ValueError(f"point_forecast must be one of {POINT_FORECASTS}")
-        if not 0 < self.quantile_level < 1:
-            raise ValueError("quantile_level must be between 0 and 1")
-
-    @property
-    def is_t5(self) -> bool:
-        return "chronos-t5" in self.model_id
+        if "chronos-2" not in self.model_id:
+            raise ValueError("model_id must be a Chronos-2 model, for example amazon/chronos-2")
+        if not MIN_CONTEXT <= self.context_length <= MAX_CONTEXT:
+            raise ValueError(f"context_length must be between {MIN_CONTEXT} and {MAX_CONTEXT}")
 
     @classmethod
     def default_grid(cls) -> dict[str, list]:
         return {
-            "model_id": [
-                "amazon/chronos-bolt-small",
-                "amazon/chronos-bolt-base",
-                "amazon/chronos-t5-small",
-            ],
-            "context_length": [128, 512],
+            "context_length": [128, 512, 2048],
+            "use_weather": [True, False],
         }
 
     @classmethod
     def default_search_space(cls) -> dict:
         return {
-            "model_id": [
-                "amazon/chronos-bolt-small",
-                "amazon/chronos-bolt-base",
-                "amazon/chronos-t5-small",
-            ],
-            "context_length": {"low": 64, "high": 512, "step": 64},
-            "point_forecast": ["median", "mean"],
+            "context_length": {"low": 64, "high": 2048, "step": 64},
+            "use_weather": [True, False],
         }
 
     @property
+    def required_features(self) -> list[str]:
+        return list(self.weather_columns) if self.use_weather else []
+
+    @property
     def max_horizon_days(self) -> int:
-        # Chronos is trained for up to 64 steps ahead
-        return 64
+        return MAX_HORIZON
 
     @property
     def min_training_rows(self) -> int:
-        return 16
+        return MIN_CONTEXT

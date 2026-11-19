@@ -60,9 +60,8 @@ models:
 
   chronos:
     grid:
-      model_id: [amazon/chronos-bolt-small, amazon/chronos-bolt-base, amazon/chronos-t5-small]
-      context_length: [128, 512]
+      context_length: [128, 512, 2048]
+      use_weather: [true, false]
     search_space:
-      model_id: [amazon/chronos-bolt-small, amazon/chronos-bolt-base, amazon/chronos-t5-small]
-      context_length: {low: 64, high: 512, step: 64}
-      point_forecast: [median, mean]
+      context_length: {low: 64, high: 2048, step: 64}
+      use_weather: [true, false]

@@ -6,7 +6,6 @@ import mlflow
 import numpy as np
 import pandas as pd
 import pytest
-import torch
 from mlflow import MlflowClient
 
 from natgas.forecasting.backtesting import Backtester, BacktestReport, ForecastMetrics
@@ -38,22 +37,42 @@ from natgas.forecasting.tuning import ModelPublisher, TuningConfig, TuningPipeli
 
 
 class FakeChronosPipeline:
-    """Stands in for a downloaded Chronos model: predicts the last value plus a step."""
+    """Stands in for a downloaded Chronos-2 model: predicts the last value plus a step."""
 
-    def predict_quantiles(self, context, prediction_length, quantile_levels):
-        last = float(context[-1])
-        path = torch.tensor([last + 0.01 * (k + 1) for k in range(prediction_length)])
-        quantiles = path.reshape(1, prediction_length, 1).repeat(1, 1, len(quantile_levels))
-        return quantiles, path.reshape(1, prediction_length)
+    def predict_df(
+        self,
+        df,
+        future_df=None,
+        id_column="item_id",
+        timestamp_column="timestamp",
+        target="target",
+        prediction_length=None,
+        quantile_levels=None,
+        context_length=None,
+        freq="B",
+        **kwargs,
+    ):
+        last = float(df[target].iloc[-1])
+        start = pd.Timestamp(df[timestamp_column].iloc[-1]) + pd.Timedelta(days=1)
+        dates = pd.bdate_range(start, periods=prediction_length, freq=freq or "B")
+        values = [last + 0.01 * (k + 1) for k in range(prediction_length)]
+        frame = pd.DataFrame(
+            {
+                id_column: df[id_column].iloc[0],
+                timestamp_column: dates,
+                "target_name": target,
+                "predictions": values,
+            }
+        )
+        for level in quantile_levels or [0.5]:
+            frame[str(level)] = values
+        return frame
 
 
 @pytest.fixture(autouse=True)
 def fake_chronos(monkeypatch: pytest.MonkeyPatch) -> None:
-    pipelines = {
-        f"{model_id}@cpu": FakeChronosPipeline()
-        for model_id in ChronosModelConfig.default_grid()["model_id"]
-    }
-    monkeypatch.setattr(ChronosModel, "pipelines", pipelines)
+    key = f"{ChronosModelConfig().model_id}@cpu"
+    monkeypatch.setattr(ChronosModel, "pipelines", {key: FakeChronosPipeline()})
 
 
 @pytest.fixture
@@ -130,11 +149,14 @@ def test_configs_validate_and_round_trip() -> None:
     assert GradientBoostingModelConfig.from_dict(config.to_dict()) == config
     assert config.required_features == []
     assert GreykiteModelConfig().required_features == ["hdd", "cdd"]
-    assert ChronosModelConfig().max_horizon_days == 64
+    assert ChronosModelConfig().required_features == ["hdd", "cdd"]
+    assert ChronosModelConfig().max_horizon_days == 1024
     with pytest.raises(ValueError):
         GradientBoostingModelConfig.from_dict({"not_a_setting": 1})
     with pytest.raises(ValueError):
-        ChronosModelConfig(model_id="amazon/chronos-t5-small", context_length=1024)
+        ChronosModelConfig(context_length=15)
+    with pytest.raises(ValueError):
+        ChronosModelConfig(model_id="not-a-chronos-model")
     with pytest.raises(ValueError):
         GreykiteModelConfig(fit_algorithm="lasso")
 
@@ -184,6 +206,25 @@ def test_greykite_uses_weather_regressors(provider: ForecastDataProvider) -> Non
     model = GreykiteModel(GreykiteModelConfig(autoregression_lags=0))
     model.train(window.training_data)
     assert list(model.history.columns) == ["price", "hdd", "cdd"]
+
+
+def test_chronos_uses_weather_covariates(provider: ForecastDataProvider) -> None:
+    window = provider.window(provider.last_date - pd.Timedelta(days=30))
+    with_weather = ChronosModel(ChronosModelConfig(context_length=64, use_weather=True))
+    with_weather.train(window.training_data)
+    assert list(with_weather.context.columns) == ["price", "hdd", "cdd"]
+    assert with_weather.context.index.max() <= window.as_of
+    future_calendar = pd.bdate_range(window.as_of + pd.Timedelta(days=1), window.forecast_dates[-1])
+    covariates = with_weather.future_covariates(window.future_features, future_calendar)
+    assert covariates["timestamp"].min() > window.as_of
+    assert covariates[["hdd", "cdd"]].notna().all().all()
+    prediction = with_weather.predict(window.future_features)
+    assert prediction.index.equals(window.forecast_dates)
+    assert prediction.notna().all()
+
+    without_weather = ChronosModel(ChronosModelConfig(context_length=64, use_weather=False))
+    without_weather.train(window.training_data)
+    assert list(without_weather.context.columns) == ["price"]
 
 
 def test_backtester_records_each_as_of(provider: ForecastDataProvider) -> None:
