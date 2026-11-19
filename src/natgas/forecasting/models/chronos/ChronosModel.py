@@ -1,4 +1,4 @@
-"""Amazon Chronos-2 zero-shot forecasts."""
+"""Amazon Chronos-2 zero-shot forecasts, with optional weather covariates."""
 
 from __future__ import annotations
 
@@ -22,8 +22,10 @@ ID_COLUMN = "id"
 class ChronosModel(AbstractModelWrapper):
     """Pretrained Chronos-2 model from Amazon, used without any fine tuning.
 
-    train() keeps the last context_length prices on a business day calendar.
-    predict() hands them to Chronos-2 and returns the median for each date.
+    train() keeps the last context_length prices, and weather when that is
+    enabled, on a business day calendar. predict() hands them to Chronos-2.
+    When use_weather is on, heating and cooling degree days are passed as
+    known future covariates for the forecast dates.
 
     The model weights are downloaded from Hugging Face once and cached. They
     are not saved with the model folder, only the model id is.
@@ -34,7 +36,7 @@ class ChronosModel(AbstractModelWrapper):
 
     def __init__(self, config: ChronosModelConfig | None = None) -> None:
         super().__init__(config)
-        self.context: pd.Series | None = None
+        self.context: pd.DataFrame | None = None
 
     @classmethod
     def pipeline_for(cls, model_id: str, device: str) -> Chronos2Pipeline:
@@ -53,11 +55,15 @@ class ChronosModel(AbstractModelWrapper):
         return cls.pipelines[key]
 
     def train(self, training_data: pd.DataFrame) -> None:
-        prices = training_data["price"].dropna()
+        columns = ["price", *self.config.required_features]
+        history = training_data[columns].dropna(subset=["price"])
         # Chronos-2 needs a regular time grid, so holidays carry the previous
-        # price forward, the same way Greykite does.
-        calendar = pd.bdate_range(prices.index[0], prices.index[-1])
-        self.context = prices.reindex(calendar).ffill().iloc[-self.config.context_length :]
+        # price and weather forward, the same way Greykite does.
+        calendar = pd.bdate_range(history.index[0], history.index[-1])
+        history = history.reindex(calendar).ffill()
+        for column in self.config.required_features:
+            history[column] = history[column].bfill()
+        self.context = history.iloc[-self.config.context_length :]
         self.is_trained = True
 
     def predict(self, future_features: pd.DataFrame) -> pd.Series:
@@ -68,6 +74,7 @@ class ChronosModel(AbstractModelWrapper):
         )
         forecast = pipeline.predict_df(
             self.context_frame(),
+            future_df=self.future_covariates(future_features, future_calendar),
             prediction_length=len(future_calendar),
             quantile_levels=[0.5],
             id_column=ID_COLUMN,
@@ -82,9 +89,23 @@ class ChronosModel(AbstractModelWrapper):
         return pd.Series(values, index=dates, name="prediction").reindex(future_features.index)
 
     def context_frame(self) -> pd.DataFrame:
-        frame = self.context.rename(TARGET_COLUMN).rename_axis(TIME_COLUMN).reset_index()
+        frame = self.context.rename_axis(TIME_COLUMN).reset_index()
+        frame = frame.rename(columns={"price": TARGET_COLUMN})
         frame.insert(0, ID_COLUMN, SERIES_ID)
         return frame
+
+    def future_covariates(
+        self, future_features: pd.DataFrame, future_calendar: pd.DatetimeIndex
+    ) -> pd.DataFrame | None:
+        if not self.config.required_features:
+            return None
+        future = pd.DataFrame(index=future_calendar)
+        for column in self.config.required_features:
+            values = future_features[column].reindex(future_calendar).ffill().bfill()
+            future[column] = values.fillna(self.context[column].iloc[-1])
+        future = future.rename_axis(TIME_COLUMN).reset_index()
+        future.insert(0, ID_COLUMN, SERIES_ID)
+        return future
 
     def save(self, folder: str | Path) -> None:
         self.check_trained()
@@ -95,7 +116,6 @@ class ChronosModel(AbstractModelWrapper):
     def load(cls, folder: str | Path) -> ChronosModel:
         folder = Path(folder)
         model = cls(cls.config_from_folder(folder))
-        context = pd.read_csv(folder / CONTEXT_FILE, parse_dates=["date"], index_col="date")
-        model.context = context["price"]
+        model.context = pd.read_csv(folder / CONTEXT_FILE, parse_dates=["date"], index_col="date")
         model.is_trained = True
         return model

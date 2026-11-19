@@ -43,6 +43,7 @@ class FakeChronosPipeline:
     def predict_df(
         self,
         df,
+        future_df=None,
         id_column="item_id",
         timestamp_column="timestamp",
         target="target",
@@ -156,7 +157,7 @@ def test_configs_validate_and_round_trip() -> None:
     assert config.required_features == []
     assert GreykiteModelConfig().required_features == HolidayFeatureSource.column_names(4)
     assert GreykiteModelConfig(use_holidays=False).required_features == []
-    assert ChronosModelConfig().required_features == []
+    assert ChronosModelConfig().required_features == ["hdd", "cdd"]
     assert ChronosModelConfig().max_horizon_days == 1024
     with pytest.raises(ValueError):
         GradientBoostingModelConfig.from_dict({"not_a_setting": 1})
@@ -274,15 +275,23 @@ def test_greykite_uses_holiday_regressors(provider: ForecastDataProvider) -> Non
     assert list(without_holidays.history.columns) == ["price"]
 
 
-def test_chronos_reads_prices_up_to_the_as_of_date(provider: ForecastDataProvider) -> None:
+def test_chronos_uses_weather_covariates(provider: ForecastDataProvider) -> None:
     window = provider.window(provider.last_date - pd.Timedelta(days=30))
-    model = ChronosModel(ChronosModelConfig(context_length=64))
-    model.train(window.training_data)
-    assert len(model.context) == 64
-    assert model.context.index.max() == window.as_of
-    prediction = model.predict(window.future_features)
+    with_weather = ChronosModel(ChronosModelConfig(context_length=64, use_weather=True))
+    with_weather.train(window.training_data)
+    assert list(with_weather.context.columns) == ["price", "hdd", "cdd"]
+    assert with_weather.context.index.max() <= window.as_of
+    future_calendar = pd.bdate_range(window.as_of + pd.Timedelta(days=1), window.forecast_dates[-1])
+    covariates = with_weather.future_covariates(window.future_features, future_calendar)
+    assert covariates["timestamp"].min() > window.as_of
+    assert covariates[["hdd", "cdd"]].notna().all().all()
+    prediction = with_weather.predict(window.future_features)
     assert prediction.index.equals(window.forecast_dates)
     assert prediction.notna().all()
+
+    without_weather = ChronosModel(ChronosModelConfig(context_length=64, use_weather=False))
+    without_weather.train(window.training_data)
+    assert list(without_weather.context.columns) == ["price"]
 
 
 def test_backtester_records_each_as_of(provider: ForecastDataProvider) -> None:
