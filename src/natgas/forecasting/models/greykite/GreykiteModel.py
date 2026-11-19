@@ -1,4 +1,4 @@
-"""LinkedIn Greykite Silverkite forecasts, with weather as regressors."""
+"""LinkedIn Greykite Silverkite forecasts, with holiday dummies as regressors."""
 
 from __future__ import annotations
 
@@ -22,10 +22,11 @@ from natgas.forecasting.models.greykite.GreykiteModelConfig import GreykiteModel
 HISTORY_FILE = "history.csv"
 TIME_COLUMN = "ts"
 VALUE_COLUMN = "price"
+NO_EVENTS = {"holiday_lookup_countries": [], "holidays_to_model_separately": []}
 
 
 class GreykiteModel(AbstractModelWrapper):
-    """Silverkite: trend, seasonality, recent prices, and weather regressors.
+    """Silverkite: trend, seasonality, recent prices, and holiday regressors.
 
     Greykite needs the regressor values for the forecast dates at fit time, so
     train() prepares the history and predict() fits and forecasts in one step.
@@ -33,6 +34,9 @@ class GreykiteModel(AbstractModelWrapper):
 
     Greykite expects an even time grid, so the history is put on a business
     day calendar and exchange holidays carry the previous price forward.
+    Holiday dummies that are never 1 in the history are left out of the fit.
+    When holiday dummies are used, Greykite's own holiday events are turned
+    off so holidays are not counted twice.
     """
 
     config_class = GreykiteModelConfig
@@ -45,7 +49,9 @@ class GreykiteModel(AbstractModelWrapper):
         columns = [VALUE_COLUMN, *self.config.required_features]
         history = training_data[columns].dropna(subset=[VALUE_COLUMN])
         calendar = pd.bdate_range(history.index[0], history.index[-1])
-        history = history.reindex(calendar).ffill()
+        history = history.reindex(calendar)
+        history[VALUE_COLUMN] = history[VALUE_COLUMN].ffill()
+        history = history.fillna(0.0)
         if self.config.history_years > 0:
             start = calendar[-1] - pd.DateOffset(days=round(365.25 * self.config.history_years))
             history = history.loc[start:]
@@ -57,22 +63,29 @@ class GreykiteModel(AbstractModelWrapper):
         future_calendar = pd.bdate_range(
             self.history.index[-1] + pd.Timedelta(days=1), future_features.index.max()
         )
-        future = pd.DataFrame(index=future_calendar)
-        for column in self.config.required_features:
-            values = future_features.get(column, pd.Series(dtype=float)).reindex(future_calendar)
-            # Missing future weather falls back to the last known value
-            future[column] = values.ffill().bfill().fillna(self.history[column].iloc[-1])
+        regressors = self.regressor_columns()
+        future = future_features[regressors].reindex(future_calendar, fill_value=0.0)
 
-        frame = pd.concat([self.history, future]).rename_axis(TIME_COLUMN).reset_index()
-        forecast = self.run_greykite(frame, len(future_calendar))
+        frame = (
+            pd.concat([self.history[[VALUE_COLUMN, *regressors]], future])
+            .rename_axis(TIME_COLUMN)
+            .reset_index()
+        )
+        forecast = self.run_greykite(frame, regressors, len(future_calendar))
         prediction = forecast.set_index(TIME_COLUMN)["forecast"].reindex(future_features.index)
         return prediction.rename("prediction")
 
-    def run_greykite(self, frame: pd.DataFrame, horizon: int) -> pd.DataFrame:
+    def regressor_columns(self) -> list[str]:
+        """Holiday dummies that are 1 at least once in the history."""
+        return [column for column in self.config.required_features if self.history[column].any()]
+
+    def run_greykite(
+        self, frame: pd.DataFrame, regressors: list[str], horizon: int
+    ) -> pd.DataFrame:
         """Fit Silverkite on the history rows and forecast the future rows."""
-        regressors = self.config.required_features
         components = ModelComponentsParam(
             regressors={"regressor_cols": regressors} if regressors else None,
+            events=NO_EVENTS if self.config.use_holidays else None,
             autoregression=self.autoregression_settings(),
             changepoints=(
                 {"changepoints_dict": {"method": "auto"}} if self.config.auto_changepoints else None

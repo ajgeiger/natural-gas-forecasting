@@ -14,14 +14,14 @@ Most forecasting demos stop at one model on one train and test split. This proje
 
 Prices from 2015-01-02 to 2026-11-18. 127 as-of dates every 14 days from 2021-12-31 to 2026-10-30, each forecasting the next 5 trading days. Same dates for every model. Best config per model, MAE, RMSE, and bias in dollars per MMBtu, MAPE and WAPE in percent.
 
-Grid search (31 configs):
+Grid search (39 configs):
 
 | Model | MAE | RMSE | MAPE | WAPE | Bias | Best config |
 | --- | --- | --- | --- | --- | --- | --- |
 | Gradient boosting | 0.2462 | 0.3885 | 6.19 | 6.49 | -0.0011 | 5 lags, depth 2, learning rate 0.03, no weather |
 | Naive | 0.2462 | 0.3828 | 6.16 | 6.49 | 0.0001 | none |
 | Chronos-2 | 0.2482 | 0.3874 | 6.18 | 6.54 | -0.0098 | context 512, no weather |
-| Greykite | 0.3035 | 0.4504 | 7.89 | 8.00 | 0.0146 | 4 years of history, 3 price lags, no weather |
+| Greykite | 0.3035 | 0.4504 | 7.89 | 8.00 | 0.0146 | 4 years of history, 3 price lags, holiday dummies off |
 
 Bayesian search (19 configs, 6 trials per model):
 
@@ -30,14 +30,15 @@ Bayesian search (19 configs, 6 trials per model):
 | Naive | 0.2462 | 0.3828 | 6.16 | 6.49 | 0.0001 | none |
 | Gradient boosting | 0.2481 | 0.3893 | 6.21 | 6.53 | -0.0049 | 13 lags, depth 2, learning rate 0.018, min leaf 89, weather |
 | Chronos-2 | 0.2490 | 0.3903 | 6.23 | 6.56 | -0.0145 | context 1472, no weather |
-| Greykite | 0.3198 | 0.4716 | 8.28 | 8.42 | -0.0035 | 4.7 years, 4 price lags, changepoints, ridge |
+| Greykite | 0.3089 | 0.4490 | 8.05 | 8.14 | 0.0063 | 6.9 years, 1 price lag, ridge, holiday dummies off |
 
-Nothing beat naive by the 1 percent margin, so the publisher kept naive and registered it as `natgas-price-forecaster` version 3 (`@champion`). That is the expected result for a liquid futures price over a few days, and it is why the publishing rule exists.
+Nothing beat naive by the 1 percent margin, so the publisher kept naive and registered it as `natgas-price-forecaster` version 4 (`@champion`). That is the expected result for a liquid futures price over a few days, and it is why the publishing rule exists.
 
 What the numbers say:
 
 - Chronos-2 lands within 1 percent of naive in grid search (MAE 0.2482 against 0.2462) with no training at all.
 - Weather as a known future covariate did not help Chronos-2 at this horizon. The best Chronos-2 configs in both searches leave it off. Backtests use observed weather as a perfect forecast, so live results with real weather forecasts would not be better.
+- US holiday dummies with 1 to 4 days before and after did not help Greykite. The best configs with them were MAE 0.3047 in grid search (4 years, 3 lags, window 2) and 0.3166 in Bayesian search (7.2 years, 3 lags, window 4, changepoints). With the dummies off, Greykite falls back to its own built-in holiday events.
 - Silverkite is built for series with strong trend and seasonality, which day to day futures prices do not have.
 
 ## How it works
@@ -104,7 +105,7 @@ if improvement >= self.min_improvement:
 | --- | --- |
 | `NaiveModel` | Repeats the last price. The baseline every other model has to beat. |
 | `GradientBoostingModel` | scikit-learn gradient boosted trees on recent daily price changes, plus degree days. Forecasts several days ahead by feeding each prediction back in. |
-| `GreykiteModel` | LinkedIn Greykite Silverkite: trend, seasonality, recent prices as lags, and degree days as regressors for the forecast dates. |
+| `GreykiteModel` | LinkedIn Greykite Silverkite: trend, seasonality, recent prices as lags, and US holiday dummies as regressors. Each holiday gets a dummy for the day itself and for up to 4 days before and after (`labor_day_pre_2`, `labor_day_post_1`). Dummies that are never 1 in the training window are left out. |
 | `ChronosModel` | Amazon Chronos-2, a pretrained time series model, used zero-shot on CPU. Heating and cooling degree days can be passed as known future covariates. Tuned on context length and weather on or off. |
 
 ### Data, backtests, search, and publishing
@@ -112,7 +113,7 @@ if improvement >= self.min_improvement:
 | Class | Job |
 | --- | --- |
 | `ForecastDataProvider` | Give it an as-of date and it returns a `ForecastWindow`: training data on or before that date, feature values for the dates to predict, and the actual prices used to score the forecast. |
-| `AbstractFeatureSource` | Base class for extra data. Each source returns only what was known on the as-of date. `WeatherFeatureSource` adds heating and cooling degree days. `StorageFeatureSource` adds the EIA storage level once each weekly report is published. |
+| `AbstractFeatureSource` | Base class for extra data. Each source returns only what was known on the as-of date. `WeatherFeatureSource` adds heating and cooling degree days. `HolidayFeatureSource` adds US holiday dummies from the `holidays` package, which are known in advance and so are valid for the forecast dates. `StorageFeatureSource` adds the EIA storage level once each weekly report is published. |
 | `Backtester` | For each as-of date gets the window, checks for leakage, trains a fresh model, predicts, and records a `BacktestResult`. Runs dates in parallel with `n_jobs`. |
 | `BacktestReport`, `ForecastMetrics` | Score one config: MAE, RMSE, MAPE, WAPE, and bias, overall and by days ahead. |
 | `AbstractOptimizer` | Backtests candidate configs, logs each one as a nested MLflow run, skips repeats, records failures without stopping, and builds the results table with skill against naive. |
@@ -162,10 +163,10 @@ import mlflow
 
 mlflow.set_tracking_uri("sqlite:///mlflow.db")
 model = mlflow.pyfunc.load_model("models:/natgas-price-forecaster@champion")
-model.predict(future_dates_frame)  # columns: date, hdd, cdd
+model.predict(future_dates_frame)  # columns: date plus the features the model uses
 ```
 
-The two notebooks take about 7 minutes each on an 8 core CPU, most of it Chronos-2.
+On an 8 core CPU the grid notebook takes about 9 minutes and the Bayesian notebook about 13, most of it Chronos-2 and Greykite.
 
 ## Spark
 
@@ -238,7 +239,8 @@ src/natgas/de/          data loading
   spark_db.py           SparkDatabase, reads and writes the database over JDBC
 src/natgas/forecasting/ models, backtests, search, and publishing
   data/                 ForecastDataProvider, ForecastWindow, SqlReader,
-                        AbstractFeatureSource, WeatherFeatureSource, StorageFeatureSource
+                        AbstractFeatureSource, WeatherFeatureSource, HolidayFeatureSource,
+                        StorageFeatureSource
   models/
     base/               AbstractModelWrapper, AbstractConfigWrapper
     naive/              NaiveModel, NaiveModelConfig
@@ -283,5 +285,6 @@ Models and tools:
 
 - [Chronos-2: From Univariate to Universal Forecasting](https://arxiv.org/abs/2510.15821) and the [`amazon/chronos-2`](https://huggingface.co/amazon/chronos-2) model card
 - [Greykite](https://github.com/linkedin/greykite) (Silverkite)
+- [holidays](https://github.com/vacanza/holidays) Python package for the US holiday calendar
 - [scikit-learn HistGradientBoostingRegressor](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.HistGradientBoostingRegressor.html)
 - [Optuna](https://optuna.org/) and [MLflow](https://mlflow.org/)

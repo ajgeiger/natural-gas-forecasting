@@ -12,6 +12,7 @@ from natgas.forecasting.backtesting import Backtester, BacktestReport, ForecastM
 from natgas.forecasting.data import (
     AbstractFeatureSource,
     ForecastDataProvider,
+    HolidayFeatureSource,
     StorageFeatureSource,
     WeatherFeatureSource,
 )
@@ -75,8 +76,13 @@ def fake_chronos(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ChronosModel, "pipelines", {key: FakeChronosPipeline()})
 
 
+@pytest.fixture(scope="module")
+def holiday_source() -> HolidayFeatureSource:
+    return HolidayFeatureSource()
+
+
 @pytest.fixture
-def provider() -> ForecastDataProvider:
+def provider(holiday_source: HolidayFeatureSource) -> ForecastDataProvider:
     dates = pd.bdate_range("2022-01-03", periods=400)
     rng = np.random.default_rng(0)
     target = pd.Series(3 + np.cumsum(rng.normal(0, 0.05, len(dates))), index=dates)
@@ -89,7 +95,8 @@ def provider() -> ForecastDataProvider:
             "cdd": rng.uniform(0, 10, len(weather_days)),
         }
     )
-    return ForecastDataProvider(target, [WeatherFeatureSource(weather)], horizon_days=5)
+    sources = [WeatherFeatureSource(weather), holiday_source]
+    return ForecastDataProvider(target, sources, horizon_days=5)
 
 
 def test_abstract_classes_cannot_be_created() -> None:
@@ -148,7 +155,8 @@ def test_configs_validate_and_round_trip() -> None:
     config = GradientBoostingModelConfig(max_depth=4, use_weather=False)
     assert GradientBoostingModelConfig.from_dict(config.to_dict()) == config
     assert config.required_features == []
-    assert GreykiteModelConfig().required_features == ["hdd", "cdd"]
+    assert GreykiteModelConfig().required_features == HolidayFeatureSource.column_names(4)
+    assert GreykiteModelConfig(use_holidays=False).required_features == []
     assert ChronosModelConfig().required_features == ["hdd", "cdd"]
     assert ChronosModelConfig().max_horizon_days == 1024
     with pytest.raises(ValueError):
@@ -159,6 +167,8 @@ def test_configs_validate_and_round_trip() -> None:
         ChronosModelConfig(model_id="not-a-chronos-model")
     with pytest.raises(ValueError):
         GreykiteModelConfig(fit_algorithm="lasso")
+    with pytest.raises(ValueError):
+        GreykiteModelConfig(holiday_window=5)
 
 
 def test_catalog_pairs_every_model_with_its_config() -> None:
@@ -201,11 +211,68 @@ def test_models_train_predict_save_load(
     pd.testing.assert_series_equal(loaded.predict(window.future_features), prediction)
 
 
-def test_greykite_uses_weather_regressors(provider: ForecastDataProvider) -> None:
-    window = provider.window(provider.last_date - pd.Timedelta(days=30))
-    model = GreykiteModel(GreykiteModelConfig(autoregression_lags=0))
+def test_holiday_columns_follow_the_window() -> None:
+    columns = HolidayFeatureSource.column_names(4)
+    labor_day = [column for column in columns if column.startswith("labor_day")]
+    assert labor_day == [
+        "labor_day",
+        "labor_day_pre_1",
+        "labor_day_pre_2",
+        "labor_day_pre_3",
+        "labor_day_pre_4",
+        "labor_day_post_1",
+        "labor_day_post_2",
+        "labor_day_post_3",
+        "labor_day_post_4",
+    ]
+    assert "labor_day_pre_3" not in HolidayFeatureSource.column_names(2)
+    assert "labor_day_pre_1" not in HolidayFeatureSource.column_names(0)
+    assert "new_years_day" in columns
+    with pytest.raises(ValueError):
+        HolidayFeatureSource(window=5)
+
+
+def test_holiday_dummies_mark_days_around_each_holiday(
+    holiday_source: HolidayFeatureSource,
+) -> None:
+    # Labor Day 2025 was Monday September 1
+    dates = pd.date_range("2025-08-28", "2025-09-05")
+    features = holiday_source.features_for(dates, pd.Timestamp("2025-08-27"))
+    assert features.loc["2025-09-01", "labor_day"] == 1
+    assert features.loc["2025-09-02", "labor_day_post_1"] == 1
+    assert features.loc["2025-08-28", "labor_day_pre_4"] == 1
+    assert features.loc["2025-09-05", "labor_day_post_4"] == 1
+    assert features["labor_day"].sum() == 1
+    # Observed days count as the holiday: July 4 2026 is a Saturday
+    observed = holiday_source.features_for(pd.DatetimeIndex(["2026-07-03"]), dates[0])
+    assert observed.loc["2026-07-03", "independence_day"] == 1
+
+
+def test_holiday_dummies_cover_future_dates(provider: ForecastDataProvider) -> None:
+    window = provider.window(provider.last_date)
+    columns = HolidayFeatureSource.column_names(4)
+    assert window.forecast_dates.min() > window.as_of
+    assert window.future_features[columns].notna().all().all()
+
+
+def test_greykite_uses_holiday_regressors(provider: ForecastDataProvider) -> None:
+    # The history starts in January 2022, so Christmas has not happened yet
+    window = provider.window(pd.Timestamp("2022-12-01"))
+    model = GreykiteModel(GreykiteModelConfig(autoregression_lags=0, holiday_window=2))
     model.train(window.training_data)
-    assert list(model.history.columns) == ["price", "hdd", "cdd"]
+    assert list(model.history.columns) == ["price", *HolidayFeatureSource.column_names(2)]
+    regressors = model.regressor_columns()
+    assert regressors
+    assert (model.history[regressors].sum() > 0).all()
+    assert "christmas_day" not in regressors
+    assert "labor_day_post_1" in regressors
+    prediction = model.predict(window.future_features)
+    assert prediction.index.equals(window.forecast_dates)
+    assert prediction.notna().all()
+
+    without_holidays = GreykiteModel(GreykiteModelConfig(autoregression_lags=0, use_holidays=False))
+    without_holidays.train(window.training_data)
+    assert list(without_holidays.history.columns) == ["price"]
 
 
 def test_chronos_uses_weather_covariates(provider: ForecastDataProvider) -> None:

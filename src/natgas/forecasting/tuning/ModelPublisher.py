@@ -89,7 +89,8 @@ class ModelPublisher:
         model = ModelCatalog.build(report.config)
         model.train(window.training_data)
 
-        example_input = window.future_features.reset_index(names="date")
+        features = window.future_features[report.config.required_features]
+        example_input = features.reset_index(names="date")
         example_output = (
             model.predict(window.future_features).rename_axis("date").reset_index(name="prediction")
         )

@@ -50,13 +50,15 @@ models:
     grid:
       history_years: [2.0, 4.0]
       autoregression_lags: [0, 3]
-      use_weather: [true, false]
+      use_holidays: [true, false]
+      holiday_window: [2, 4]
     search_space:
       history_years: {low: 2.0, high: 8.0}
       autoregression_lags: {low: 0, high: 5}
-      use_weather: [true, false]
+      use_holidays: [true, false]
+      holiday_window: {low: 0, high: 4}
       auto_changepoints: [true, false]
-      fit_algorithm: [ridge, linear]
+      fit_algorithm: [ridge]
 
   chronos:
     grid:

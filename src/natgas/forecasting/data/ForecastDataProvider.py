@@ -9,6 +9,7 @@ from natgas.config import Settings
 from natgas.db import get_engine
 from natgas.forecasting.data.AbstractFeatureSource import AbstractFeatureSource
 from natgas.forecasting.data.ForecastWindow import ForecastWindow
+from natgas.forecasting.data.HolidayFeatureSource import HolidayFeatureSource
 from natgas.forecasting.data.SqlReader import SqlReader
 from natgas.forecasting.data.StorageFeatureSource import StorageFeatureSource
 from natgas.forecasting.data.WeatherFeatureSource import WeatherFeatureSource
@@ -47,7 +48,7 @@ class ForecastDataProvider:
     def from_settings(
         cls, settings: Settings, horizon_days: int = 5, target_column: str = "high"
     ) -> ForecastDataProvider:
-        """Build a provider from the database: daily prices plus weather and storage."""
+        """Build a provider from the database: daily prices plus weather, holidays, and storage."""
         if target_column not in PRICE_COLUMNS:
             raise ValueError(f"target_column must be one of {PRICE_COLUMNS}")
         engine = get_engine(settings.db_url)
@@ -56,7 +57,10 @@ class ForecastDataProvider:
         prices["date"] = pd.to_datetime(prices["date"])
         target = prices.set_index("date")["value"]
 
-        sources: list[AbstractFeatureSource] = [WeatherFeatureSource.from_database(engine)]
+        sources: list[AbstractFeatureSource] = [
+            WeatherFeatureSource.from_database(engine),
+            HolidayFeatureSource(),
+        ]
         storage = StorageFeatureSource.from_database(engine, settings.storage_region)
         # Storage needs an EIA key to load, so only use it when it has data
         if storage.has_data:
