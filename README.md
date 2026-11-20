@@ -1,6 +1,6 @@
 # natural-gas-forecasting
 
-**Start here: [grid search backtest notebook](experiments/grid_search_backtest.ipynb).** It runs every model on the same 125 rolling as-of dates, forecasts 30 trading days ahead from each, scores them, and publishes the winner to the MLflow model registry. The [Bayesian search notebook](experiments/bayesian_backtest.ipynb) repeats the search with Optuna.
+**Start here: [grid search backtest notebook](experiments/grid_search_backtest.ipynb).** It runs every model on the same 125 rolling as-of dates, forecasts 30 trading days ahead from each, scores them, and publishes the winner to the MLflow model registry. The [Bayesian search notebook](experiments/bayesian_backtest.ipynb) repeats the search with Optuna. Every day after that, the [model tournament](#the-model-tournament) turns the results into one published forecast: each model family's champion competes in three horizon events, and the event winners make up the business facing forecast.
 
 Daily forecasts of the natural gas front-month futures price (Yahoo Finance `NG=F`, daily high), using weather in major gas-demand cities and EIA weekly storage as inputs.
 
@@ -8,7 +8,7 @@ Daily forecasts of the natural gas front-month futures price (Yahoo Finance `NG=
 
 Natural gas is one of the most volatile commodities there is. Utilities, power plants, and industrial buyers plan purchases days and weeks ahead, and a few cents per MMBtu on millions of MMBtu is real money. Weather drives demand, storage shows how tight supply is, and the futures price reacts to both.
 
-Most forecasting demos stop at one model on one train and test split. This project is built the way a production team would want it: every model is backtested on the same dates with no look-ahead, every run is logged, and a model only replaces the baseline when it earns it.
+Most forecasting demos stop at one model on one train and test split. This project is built the way a production team would want it: every model is backtested on the same dates with no look-ahead, every run is logged, and a model only replaces the baseline when it earns it. In production that rule becomes a tournament: challengers prove themselves over 60 live days before they take a title, and each horizon of the published forecast goes to whichever champion is actually best at it.
 
 ## What it shows
 
@@ -162,6 +162,8 @@ export EIA_API_KEY=your_key   # optional, storage is skipped without it
 natgas init-db
 natgas ingest all             # 2015-01-01 through today by default
 natgas tune                   # backtest, log to MLflow, register the best model
+natgas tournament seed        # champion and challenger per family from the grid search
+natgas score                  # score every contender, run the tournament, publish
 ```
 
 More commands:
@@ -174,43 +176,163 @@ mlflow ui --backend-store-uri sqlite:///mlflow.db
 make lint && make test
 ```
 
-Loaders upsert on each table's key, so reruns do not create duplicates. Every run is logged to the `ingestion_runs` table. Run commands from the repo root: MLflow runs go to `mlflow.db` with artifacts in `mlruns/`, both git ignored. Chronos-2 weights are downloaded from Hugging Face the first time and cached; only the model id is saved with a published model. Load the champion anywhere with:
+Loaders upsert on each table's key, so reruns do not create duplicates. Every run is logged to the `ingestion_runs` table. Run commands from the repo root: MLflow runs go to `mlflow.db` with artifacts in `mlruns/`, both git ignored. Chronos-2 weights are downloaded from Hugging Face the first time and cached; only the model id is saved with a published model. Load any family champion anywhere with:
 
 ```python
 import mlflow
 
 mlflow.set_tracking_uri("sqlite:///mlflow.db")
-model = mlflow.pyfunc.load_model("models:/natgas-price-forecaster@champion")
+model = mlflow.pyfunc.load_model("models:/natgas-chronos@champion")
 model.predict(future_dates_frame)  # columns: date plus the features the model uses
 ```
 
+`natgas tune` still registers its single overall winner as `natgas-price-forecaster@champion` (versions 1 to 9 live there), which the notebooks and `natgas export-backtests` read. Daily scoring only uses the per family registries.
+
 On an 8 core CPU the grid notebook takes about 25 minutes and the Bayesian notebook about 40, most of it Greykite.
+
+## The model tournament
+
+No single model wins every horizon. In the backtests gradient boosting is best over days 6 to 15, Chronos-2 is best over days 16 to 30, and over days 1 to 5 nothing clearly beats repeating the last price. So instead of crowning one model, the daily job runs a tournament, organized like the Olympics.
+
+**Trials.** Every model family (Chronos-2, gradient boosting, Greykite) has its own MLflow registered model, `natgas-chronos`, `natgas-gradient-boosting`, and `natgas-greykite`, each with a `@champion` and a `@challenger`. A challenger is a model in trials. It is scored every day next to its family champion, and it earns the title only after 60 matured production days with a lower blended MAE than the champion. When that happens the aliases swap: the challenger becomes `@champion`, and the former champion goes back to trials as `@challenger`, also tagged `@legacy_champion`. Naive is not a family. It is the baseline, `natgas-naive@baseline`, scored every day so everyone has something to beat.
+
+**Events.** Family champions compete in three events, one per horizon: days 1 to 5, days 6 to 15, and days 16 to 30. To qualify for an event a champion must follow the domain rules and beat naive in that event by at least `min_improvement` (1 percent lower error). The qualified champion with the lowest blended MAE wins the event. If nobody qualifies, naive wins it, because a model that does not clearly beat "repeat the last price" is not worth the risk.
+
+**The scorecard.** Trials and events use the same blended score. A model is judged on the last 30 as-of dates whose forecasts have matured in production. A new model has little production history, so its backtest fills the rest of the window:
+
+```
+prod_weight = min(prod_days, 30) / 30
+blended_mae = prod_weight * prod_mae + (1 - prod_weight) * backtest_mae
+```
+
+On day one the score is the backtest MAE of that exact version in that exact bucket. After 15 matured days it is half production and half backtest. After 30 it is pure production. If a version has no backtest score for a bucket, the naive backtest MAE stands in.
+
+**The podium.** The three event winners are stitched into one 30 day forecast, saved as stage `production` in `predictions`. That is the business facing forecast for the dashboard. Each row keeps the model and registry version of the winner that produced it, and the numbers are copies of what that winner forecast in its own stage, so what is published is exactly what was scored.
+
+**Domain rules.** Chronos-2 must use weather covariates, and Greykite must not use weather. Seeding only picks configs that follow them, the scorer refuses to score a config that breaks them, and a rule breaker cannot qualify for an event.
+
+Opening day, as of 2026-11-18. Every contender has zero matured production days, so every blended MAE is its backtest MAE:
+
+| Event | Winner | Blended MAE | Naive | Better than naive | Also ran |
+| --- | --- | --- | --- | --- | --- |
+| Days 1 to 5 | Naive (`natgas-naive` v1) | 0.2476 | 0.2476 | 0.00% | gradient boosting 0.2473 (0.15%, short of the 1% margin), Chronos-2 0.2518, Greykite 0.3039 |
+| Days 6 to 15 | Gradient boosting (`natgas-gradient-boosting` v1) | 0.4594 | 0.4656 | 1.34% | Chronos-2 0.4628 (0.61%), Greykite 0.6123 |
+| Days 16 to 30 | Chronos-2 (`natgas-chronos` v1) | 0.6459 | 0.6589 | 1.98% | gradient boosting 0.6537 (0.79%), Greykite 0.9629 |
+
+The published forecast for 2026-11-18 is naive for days 1 to 5, gradient boosting for days 6 to 15, and Chronos-2 with its 80 percent interval for days 16 to 30. All three challengers started their trials the same day.
+
+Seeded families, from the latest 30 day grid search:
+
+| Registry | `@champion` | `@challenger` |
+| --- | --- | --- |
+| `natgas-chronos` | v1: context 512, weather, yearly off, MAE 0.5192 | v2: context 2048, weather, yearly off, MAE 0.5225 |
+| `natgas-gradient-boosting` | v1: 5 lags, depth 2, learning rate 0.03, no weather, yearly on, MAE 0.5212 | v2: same with yearly off, MAE 0.5236 |
+| `natgas-greykite` | v1: 4 years, 3 price lags, holiday dummies off, MAE 0.7362 | v2: 4 years, 3 price lags, holiday dummies on with a 2 day window, MAE 0.7479 |
+| `natgas-naive` | `@baseline` v1, MAE 0.5259 | |
+
+Chronos-2 without weather scored 0.5204 in the grid, second best, but it breaks the weather rule, so the next best weather config is the challenger. Greykite's second best config (holiday window 2 with holidays off) forecasts exactly the same as the best one, so the seeder skips it and takes the next distinct config.
+
+```mermaid
+flowchart TD
+    grid[Latest grid search in MLflow] --> seed[TournamentSeeder]
+    seed --> registries[Family registries: champion and challenger per family, naive baseline]
+    refresh[DataRefresher] --> score[ProductionScorer: every contender]
+    registries --> score
+    score --> stages[(predictions: one stage per contender)]
+    stages --> actuals[ActualsRefresher: forecast_actuals]
+    actuals --> scorecard[BlendedScorer: 30 day production plus backtest]
+    scorecard --> trials{TrialJudge: 60 days and ahead of the champion?}
+    trials -- yes --> promote[Challenger takes the title]
+    promote --> registries
+    trials -- no --> events[EventJudge: days 1 to 5, 6 to 15, 16 to 30]
+    scorecard --> events
+    events --> results[(tournament_standings and event_winners)]
+    events --> stitch[ForecastStitcher]
+    stitch --> production[(predictions: stage production)]
+    production --> dashboard[Business dashboard]
+```
+
+### Tournament code highlights
+
+`BlendedScorer` moves each score from the backtest to production as the window fills:
+
+```python
+@staticmethod
+def blend(
+    prod_mae: float, prod_days: int, backtest_mae: float, window_days: int = 30
+) -> tuple[float, float]:
+    """prod_weight and blended_mae."""
+    prod_weight = min(prod_days, window_days) / float(window_days)
+    prod_mae = prod_mae if prod_days > 0 else 0.0
+    return prod_weight, prod_weight * prod_mae + (1 - prod_weight) * backtest_mae
+```
+
+`EventJudge` only lets a champion into an event when it follows the rules and clearly beats naive:
+
+```python
+def qualifies(self, champion: Contender, score: BlendedScore, baseline: BlendedScore) -> bool:
+    if champion.config is None or not ModelRules.passes(champion.config):
+        return False
+    return score.blended_mae <= baseline.blended_mae * (1 - self.min_improvement)
+```
+
+`ChallengerTrial` decides when a challenger has earned the title:
+
+```python
+@property
+def eligible(self) -> bool:
+    return self.trial_days >= self.required_days and self.challenger_ahead
+```
+
+| Class | Job |
+| --- | --- |
+| `TournamentConfig` | Families, baseline, trial days (60), scorecard window (30), and the qualifying margin, from the `tournament` section of `config/tuning.yaml`. |
+| `Contender` | One registry alias and the version, config, and backtest MAE per bucket behind it. Its stage is the name its forecasts get, such as `chronos:champion` or `baseline:naive`. |
+| `FamilyRegistry` | Loads every contender from its registry alias, reads backtest MAE from the version tags, and swaps the titles on a promotion. |
+| `TournamentSeeder` | Seeds every family from the latest grid search: best valid config as `@champion`, next best distinct valid config as `@challenger`, naive as `@baseline`. Uses the scores the grid search logged, so nothing is backtested again. |
+| `ModelRules` | Chronos-2 must use weather, Greykite must not. |
+| `BlendedScorer`, `BlendedScore` | The 30 day production plus backtest scorecard per contender and bucket. |
+| `TrialJudge`, `ChallengerTrial` | Counts each challenger's matured production days since its trial started and compares it with its champion. |
+| `EventJudge`, `EventResult` | Qualifies the champions for one event and picks the winner, or naive. |
+| `ForecastStitcher` | Copies each winner's forecasts for its days into stage `production`. |
+| `TournamentStore` | Writes `tournament_standings`, `event_winners`, `challenger_trials`, and `promotion_history`. |
+| `ModelTournament`, `TournamentOutcome` | One daily round: trials and promotions, scorecard, events, standings, and the stitched forecast. |
+| `LegacyStageRelabeler` | One time cutover: renames rows from the old single registry setup to `legacy:champion` and `legacy:challenger`. |
+
+```bash
+natgas tournament seed               # once: champion and challenger per family from the latest grid search
+natgas tournament seed --force       # seed again after a new grid search, restarting every trial
+natgas tournament standings          # latest event winners, trials, and standings
+```
+
+`natgas tournament seed` refuses to run when a family already has a champion, so trial progress is never wiped by accident. It also widens the `stage` column of older databases (`StageColumnMigrator`) and relabels the pre-tournament rows, so `production` only ever means the tournament's published forecast.
 
 ## Production scoring
 
 `natgas score` (or `make score`) is the daily job. Run it by hand, from cron with `scripts/run_scoring.sh`, or as a Prefect flow (see Prefect below).
 
 1. `DataRefresher` reloads the last 30 days of prices, weather, and storage with the same loaders as `natgas ingest`, so late corrections replace earlier values.
-2. The as-of date is the latest trading day before today. Today's bar is still trading, so it is never used.
-3. `ProductionScorer` loads two versions of `natgas-price-forecaster` from the MLflow registry: `@champion` is scored as stage `production` (Chronos-2, context 512, with weather, version 8) and `@challenger` as stage `staging` (the best grid search gradient boosting config, version 9). Each version's config is refit on data through the as-of date, the same way every backtest ran. The scorer refuses a Chronos-2 config without weather or a Greykite config with weather.
-4. `PredictionStore` appends 30 rows per stage to `predictions`. A stage that already has rows for the as-of date is skipped, and the table key (`as_of_date`, `stage`, `horizon_day`) blocks duplicates, so reruns are safe.
-5. `ActualsRefresher` copies every forecast whose target date has a price into `forecast_actuals`, with the actual and the error.
-6. `ForecastMonitor` recreates the `forecast_accuracy` and `forecast_accuracy_rolling` views: MAE, MAPE, WAPE, and bias by model, stage, and horizon bucket (days 1 to 5, 6 to 15, 16 to 30, and all days), over all matured forecasts and over the last 20 as-of dates.
+2. The as-of date is the latest trading day before today. Today's bar is still trading, so it is never used. `ProductionScorer` loads every contender from its registry alias (`@champion` and `@challenger` of each family, and `natgas-naive@baseline`), refits each version's config on data through the as-of date, the same way every backtest ran, and saves 30 rows per contender under its own stage. The scorer refuses a Chronos-2 config without weather or a Greykite config with weather.
+3. `ActualsRefresher` copies every forecast whose target date has a price into `forecast_actuals`, with the actual and the error, and `ForecastMonitor` recreates the `forecast_accuracy` and `forecast_accuracy_rolling` views: MAE, MAPE, WAPE, and bias by stage and horizon bucket (days 1 to 5, 6 to 15, 16 to 30, and all days), over all matured forecasts and over the last 20 as-of dates.
+4. `ModelTournament` judges the 60 day trials and promotes any challenger that earned it, scores every contender on the blended scorecard, runs the three events, saves the standings, winners, and trial progress, and stitches the winners into stage `production`.
 
-Future weather. Chronos-2 uses degree days for the 30 forecast days, and those days have not happened yet. `ForecastWeatherFeatureSource` fills them with the Open-Meteo forecast that the weather loader stores (14 days, `weather.forecast_days` in `config/settings.yaml`, which covers about 10 trading days) and, after that, the daily normal: the average degree days for that day of the year over the last 10 years, smoothed over 15 days. The backtests used observed weather for all 30 days, so expect live accuracy on days 11 to 30 to sit closer to Chronos-2 without weather.
+`PredictionStore` only appends. A stage that already has rows for the as-of date is skipped, and the table key (`as_of_date`, `stage`, `horizon_day`) blocks duplicates, so reruns are safe. The tournament tables are keyed by as-of date, so a rerun replaces that day's standings instead of adding to them.
+
+Future weather. Chronos-2 uses degree days for the 30 forecast days, and those days have not happened yet. `ForecastWeatherFeatureSource` fills them with the Open-Meteo forecast that the weather loader stores (14 days, `weather.forecast_days` in `config/settings.yaml`, which covers about 10 trading days) and, after that, the daily normal: the average degree days for that day of the year over the last 10 years, smoothed over 15 days. The backtests used observed weather for all 30 days, so expect live accuracy on days 11 to 30 to sit closer to Chronos-2 without weather. The blended scorecard picks that up on its own as production days replace backtest days.
 
 Forecast dates past the last price skip exchange holidays (`TradingCalendar`), so every forecast gets an actual.
 
 ```bash
-natgas register-challenger   # once: best gradient boosting config as @challenger
+natgas tournament seed       # once: champion and challenger per family
 natgas export-backtests      # backtest_forecasts table and outputs/backtest_forecasts.parquet
-natgas score                 # refresh, score, backfill actuals, update the views
+natgas score                 # refresh, score, backfill actuals, run the tournament
 natgas score --no-refresh    # score from the data already loaded
+natgas tournament standings  # what the last run decided
 ```
 
 ### Prefect
 
-`ScoringFlow` runs the same job as a Prefect 3 flow, `natgas-daily-scoring`, with one task per stage: `refresh_data` (retries twice, 30 seconds apart, for network hiccups at Yahoo, Open-Meteo, or EIA), `score_models`, and `backfill_actuals`. The tasks call `ScoringPipeline`'s stage methods, so `natgas score` and `natgas flow` write the same rows and reruns stay safe. The open-source Prefect server shows run history, each task's state and logs, failures with tracebacks, and the schedule at http://127.0.0.1:4200.
+`ScoringFlow` runs the same job as a Prefect 3 flow, `natgas-daily-scoring`, with one task per stage: `refresh_data` (retries twice, 30 seconds apart, for network hiccups at Yahoo, Open-Meteo, or EIA), `score_models`, `backfill_actuals`, and `run_tournament`. The tasks call `ScoringPipeline`'s stage methods, so `natgas score` and `natgas flow` write the same rows and reruns stay safe. The open-source Prefect server shows run history, each task's state and logs, failures with tracebacks, and the schedule at http://127.0.0.1:4200.
 
 Run from the repo root. Start the server in one terminal and leave it open:
 
@@ -243,8 +365,23 @@ Tables and views in `data/natgas.db`:
 | `forecast_actuals` | table, matured predictions | the `predictions` columns plus horizon_bucket, actual, error (forecast minus actual), filled_at |
 | `forecast_accuracy` | view | model, stage, horizon_bucket, forecasts, as_of_dates, first_as_of_date, last_as_of_date, mae, mape, wape, bias |
 | `forecast_accuracy_rolling` | view | model, stage, horizon_bucket, as_of_date, as_of_dates, forecasts, mae, mape, wape, bias |
+| `tournament_standings` | table, one row per as-of date, bucket, and stage | run_id, family, role, model, model_version, registered_model, prod_days, prod_mae, backtest_mae, backtest_source, prod_weight, blended_mae, baseline_mae, improvement, rules_passed, qualified, rank, is_winner, created_at |
+| `event_winners` | table, one row per as-of date and event | run_id, first_day, last_day, family, stage, model, model_version, registered_model, blended_mae, baseline_mae, improvement, qualified_count, reason, created_at |
+| `challenger_trials` | table, one row per as-of date and family | run_id, registered_model, champion_version, challenger_version, trial_started, trial_days, required_days (60), champion_mae, challenger_mae, challenger_ahead, promoted, promoted_at, status (in trials, eligible, champion defended, promoted) |
+| `promotion_history` | table, append only | id, as_of_date, family, registered_model, new_champion_version, former_champion_version, trial_days, champion_mae, challenger_mae, run_id, promoted_at |
 
-`lower` and `upper` are the 10th and 90th percentiles, filled for Chronos-2 only. `model_version` is the registry version, or `run-` plus the MLflow run id for a backtest config that was never registered.
+Stages in `predictions` and `forecast_actuals`:
+
+| Stage | What it is |
+| --- | --- |
+| `production` | The business facing forecast: days 1 to 5, 6 to 15, and 16 to 30 each from that event's winner. `model` and `model_version` say which winner made each row. |
+| `chronos:champion`, `chronos:challenger` | Chronos-2 family, `natgas-chronos` |
+| `gradient_boosting:champion`, `gradient_boosting:challenger` | Gradient boosting family, `natgas-gradient-boosting` |
+| `greykite:champion`, `greykite:challenger` | Greykite family, `natgas-greykite` |
+| `baseline:naive` | The naive baseline, `natgas-naive` |
+| `legacy:champion`, `legacy:challenger` | Forecasts from before the tournament, when `production` was `natgas-price-forecaster@champion` and `staging` its `@challenger` |
+
+The accuracy views have one row per stage and bucket. Production mixes event winners, so when a bucket's forecasts come from more than one model its `model` column says `tournament`. `lower` and `upper` are the 10th and 90th percentiles, filled for Chronos-2 only. `model_version` is the version in that family's registry, or `run-` plus the MLflow run id for a backtest config that was never registered. Timestamps are stored in UTC.
 
 ## Spark
 
@@ -295,13 +432,14 @@ flowchart LR
     storage --> db
     db <--> spark[Spark over JDBC]
     db --> models[models and backtests]
-    models --> mlflow[MLflow registry]
-    mlflow --> forecast[daily forecast]
+    models --> mlflow[MLflow family registries]
+    mlflow --> tournament[daily tournament]
+    tournament --> forecast[published forecast]
     forecast --> db
     db --> dashboard[dashboard]
 ```
 
-Ingestion, backtesting, MLflow tracking, the model registry, and the daily scoring job exist today. The dashboard is planned. The scoring job can run on a schedule with cron or Prefect.
+Ingestion, backtesting, MLflow tracking, the family registries, the daily scoring job, and the tournament exist today. The dashboard is planned. The scoring job can run on a schedule with cron or Prefect.
 
 ## Layout
 
@@ -332,10 +470,17 @@ src/natgas/forecasting/ models, backtests, search, and publishing
                         HyperparameterGrid, OptimizerCatalog
   tuning/               TuningConfig, TuningPipeline, TuningOutcome, ModelPublisher,
                         PublishDecision, MlflowModelAdapter
-  production/           ScoringPipeline, DataRefresher, ProductionScorer, PredictionStore,
-                        RegisteredModelLoader, ActualsRefresher, ForecastMonitor, ScoringRun,
-                        GridSearchRuns, BacktestExporter, ChallengerPublisher
-config/tuning.yaml      model grids and search spaces, backtest window, publish rule, MLflow
+  production/           ScoringPipeline, ScoringFlow, DataRefresher, ProductionScorer,
+                        PredictionStore, RegisteredModelLoader, ActualsRefresher,
+                        ForecastMonitor, ScoringRun, GridSearchRuns, BacktestExporter,
+                        StageColumnMigrator
+    tournament/         TournamentConfig, Contender, FamilyRegistry, TournamentSeeder,
+                        SeededVersion, ModelRules, BlendedScorer, BlendedScore, TrialJudge,
+                        ChallengerTrial, EventJudge, EventResult, ForecastStitcher,
+                        TournamentStore, ModelTournament, TournamentOutcome,
+                        LegacyStageRelabeler
+config/tuning.yaml      model grids and search spaces, backtest window, publish rule, MLflow,
+                        tournament rules
 experiments/            grid search and Bayesian search notebooks
 src/natgas/cli.py       natgas command
 tests/                  pytest, no network calls
@@ -351,8 +496,10 @@ tests/                  pytest, no network calls
 - [ ] ARIMA models
 - [x] Rolling-origin backtests and a scoreboard (MAE, RMSE, MAPE, WAPE, bias)
 - [x] Grid and Bayesian search logged to MLflow, winner registered as `champion` only if it beats naive
-- [ ] Model stages: Testing, Challenger, Champion, Legacy Champion
-- [x] Daily scoring job (`natgas score`) for the champion and a challenger, with actuals and accuracy views
+- [x] Model stages: Challenger, Champion, Legacy Champion, per model family
+- [x] Daily scoring job (`natgas score`) for every family champion and challenger and naive, with actuals and accuracy views
+- [x] Model tournament: 60 day challenger trials, horizon events, and a stitched production forecast
+- [ ] Send each new tuning run's best config per family into trials as `@challenger`
 - [ ] Run the scoring job on a schedule, and a weekly retrain
 - [ ] Streamlit dashboard
 
@@ -370,4 +517,5 @@ Models and tools:
 - [Greykite](https://github.com/linkedin/greykite) (Silverkite)
 - [holidays](https://github.com/vacanza/holidays) Python package for the US holiday calendar
 - [scikit-learn HistGradientBoostingRegressor](https://scikit-learn.org/stable/modules/generated/sklearn.ensemble.HistGradientBoostingRegressor.html)
-- [Optuna](https://optuna.org/) and [MLflow](https://mlflow.org/)
+- [Optuna](https://optuna.org/) and [MLflow](https://mlflow.org/), including [model registry aliases](https://mlflow.org/docs/latest/ml/model-registry/)
+- [Prefect](https://docs.prefect.io/) for the scheduled daily flow
