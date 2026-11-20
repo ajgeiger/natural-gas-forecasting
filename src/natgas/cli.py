@@ -4,7 +4,7 @@ export-backtests, spark-show."""
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import typer
 
@@ -20,10 +20,14 @@ from natgas.forecasting.production import (
     ScoringFlow,
     ScoringPipeline,
     StageColumnMigrator,
+    TournamentSimulator,
 )
 from natgas.forecasting.production.ScoringPipeline import MARKET_TIMEZONE
 from natgas.forecasting.production.tournament import (
+    BacktestTagRefresher,
+    BacktestTrimmer,
     LegacyStageRelabeler,
+    ProductionHistoryReset,
     TournamentConfig,
     TournamentSeeder,
     TournamentStore,
@@ -223,6 +227,47 @@ def tournament_standings_command() -> None:
     columns = ["horizon_bucket", "rank", "stage", "prod_days", "blended_mae", "qualified"]
     typer.echo("\nstandings:")
     typer.echo(standings.sort_values(["horizon_bucket", "rank"])[columns].to_string(index=False))
+
+
+@tournament_app.command("simulate")
+def tournament_simulate_command(
+    config: str = TuningOption,
+    end: str = typer.Option(None, help="Last day to replay, YYYY-MM-DD. Defaults to yesterday."),
+    days: int = typer.Option(60, help="Trading days to replay, ending on end."),
+    trim_backtests: bool = typer.Option(
+        False, help="Drop backtests from the replayed days and rescore the backtest tags."
+    ),
+    reset: bool = typer.Option(False, help="Empty the production and tournament tables first."),
+    parquet: str = typer.Option("outputs/backtest_forecasts.parquet", help="Backtest Parquet."),
+) -> None:
+    """Replay past trading days as production, one day at a time, with no look-ahead."""
+    settings = load_settings()
+    init_db(settings.db_url)
+    tuning = TuningConfig.from_yaml(config)
+    tournament = TournamentConfig.from_yaml(config)
+    last_day = (
+        date.fromisoformat(end) if end else datetime.now(MARKET_TIMEZONE).date() - timedelta(days=1)
+    )
+    simulator = TournamentSimulator(settings, tournament, tuning.horizon_days, tuning.target_column)
+    sim_days = simulator.simulation_days(last_day, days)
+    first_day = sim_days[0].date()
+    typer.echo(f"replaying {len(sim_days)} trading days, {first_day} to {sim_days[-1].date()}")
+    if trim_backtests:
+        trimmed = BacktestTrimmer(settings.db_url, parquet).trim(first_day)
+        typer.echo(f"backtests on or after {first_day} removed: {trimmed}")
+        for item in BacktestTagRefresher(tournament).refresh(first_day):
+            mae = item["metrics"].get("mae")
+            score = f"mae {mae:.4f}" if mae is not None else "tags removed"
+            typer.echo(f"{item['name']} v{item['version']}: {score} from {item['rows']} rows")
+    if reset:
+        typer.echo(f"cleared: {ProductionHistoryReset(settings.db_url).clear()}")
+    for run in simulator.run(last_day, days):
+        winners = ", ".join(f"{bucket}: {stage}" for bucket, stage in run.events.items())
+        promoted = ", ".join(run.promoted) or "none"
+        typer.echo(
+            f"{run.as_of_date.date()} {run.run_id}: {run.actuals} matured, "
+            f"{winners}, promoted {promoted}"
+        )
 
 
 def echo_run(summary: dict) -> None:

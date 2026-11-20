@@ -298,12 +298,23 @@ def eligible(self) -> bool:
 | `TournamentStore` | Writes `tournament_standings`, `event_winners`, `challenger_trials`, and `promotion_history`. |
 | `ModelTournament`, `TournamentOutcome` | One daily round: trials and promotions, scorecard, events, standings, and the stitched forecast. |
 | `LegacyStageRelabeler` | One time cutover: renames rows from the old single registry setup to `legacy:champion` and `legacy:challenger`. |
+| `TournamentSimulator` | Replays past trading days through scoring, actuals, and the tournament, one day at a time, with nothing from after each day. |
+| `BacktestTrimmer`, `BacktestTagRefresher` | Drop backtests made on or after the first replayed day, and rescore each version's `backtest_` tags from forecasts whose target date came before it. |
+| `ProductionHistoryReset` | Empties the prediction and tournament tables before a replay. Source data and backtests stay. |
 
 ```bash
 natgas tournament seed               # once: champion and challenger per family from the latest grid search
 natgas tournament seed --force       # seed again after a new grid search, restarting every trial
 natgas tournament standings          # latest event winners, trials, and standings
+natgas tournament simulate --end 2026-11-18 --days 60 --trim-backtests --reset
+                                     # replay the last 60 trading days as production
 ```
+
+### Replaying the past as production
+
+A new tournament has no production record, so the scorecard leans on backtests for its first 30 days and no trial can finish for 60. `natgas tournament simulate` builds that record by replaying past trading days as if each one were today. For every day, oldest first, prices, weather, and storage after that day are dropped before any model sees them. There is no stored weather forecast from back then, so every future date gets the 10 year smoothed daily normal from weather observed up to that day. Every contender is scored under a run id that starts with `sim_`, matured forecasts get their actual price, and the tournament runs for that day. Live runs after the replay get plain hex run ids, so the dashboard can tell the two apart.
+
+`--trim-backtests` keeps backtests and production apart: backtests made on or after the first replayed day are removed from `backtest_forecasts` and its Parquet copy, and each version's `backtest_` tags are rescored from forecasts whose target date came before that day, so the scorecard never borrows a price the replay has not reached yet. `--reset` empties `predictions`, `forecast_actuals`, and the tournament tables first.
 
 `natgas tournament seed` refuses to run when a family already has a champion, so trial progress is never wiped by accident. It also widens the `stage` column of older databases (`StageColumnMigrator`) and relabels the pre-tournament rows, so `production` only ever means the tournament's published forecast.
 
@@ -473,12 +484,13 @@ src/natgas/forecasting/ models, backtests, search, and publishing
   production/           ScoringPipeline, ScoringFlow, DataRefresher, ProductionScorer,
                         PredictionStore, RegisteredModelLoader, ActualsRefresher,
                         ForecastMonitor, ScoringRun, GridSearchRuns, BacktestExporter,
-                        StageColumnMigrator
+                        StageColumnMigrator, TournamentSimulator
     tournament/         TournamentConfig, Contender, FamilyRegistry, TournamentSeeder,
                         SeededVersion, ModelRules, BlendedScorer, BlendedScore, TrialJudge,
                         ChallengerTrial, EventJudge, EventResult, ForecastStitcher,
                         TournamentStore, ModelTournament, TournamentOutcome,
-                        LegacyStageRelabeler
+                        LegacyStageRelabeler, BacktestTrimmer, BacktestTagRefresher,
+                        ProductionHistoryReset
 config/tuning.yaml      model grids and search spaces, backtest window, publish rule, MLflow,
                         tournament rules
 experiments/            grid search and Bayesian search notebooks

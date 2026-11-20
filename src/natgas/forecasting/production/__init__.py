@@ -12,6 +12,7 @@ from natgas.forecasting.production.ScoringFlow import ScoringFlow
 from natgas.forecasting.production.ScoringPipeline import ScoringPipeline
 from natgas.forecasting.production.ScoringRun import ScoringRun
 from natgas.forecasting.production.StageColumnMigrator import StageColumnMigrator
+from natgas.forecasting.production.TournamentSimulator import TournamentSimulator
 
 __all__ = [
     "ActualsRefresher",
@@ -26,4 +27,5 @@ __all__ = [
     "ScoringPipeline",
     "ScoringRun",
     "StageColumnMigrator",
+    "TournamentSimulator",
 ]

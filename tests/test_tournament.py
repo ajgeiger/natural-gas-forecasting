@@ -17,6 +17,7 @@ from typer.testing import CliRunner
 from natgas import cli
 from natgas.config import Settings
 from natgas.db import (
+    BacktestForecast,
     ForecastActual,
     Prediction,
     Price,
@@ -27,7 +28,7 @@ from natgas.db import (
     upsert,
 )
 from natgas.forecasting.backtesting import Backtester
-from natgas.forecasting.data import ForecastDataProvider
+from natgas.forecasting.data import ForecastDataProvider, ForecastWeatherFeatureSource
 from natgas.forecasting.models import (
     ChronosModel,
     ChronosModelConfig,
@@ -36,8 +37,15 @@ from natgas.forecasting.models import (
     NaiveModelConfig,
 )
 from natgas.forecasting.optimization import GridSearchOptimizer
-from natgas.forecasting.production import GridSearchRuns, PredictionStore, StageColumnMigrator
+from natgas.forecasting.production import (
+    GridSearchRuns,
+    PredictionStore,
+    StageColumnMigrator,
+    TournamentSimulator,
+)
 from natgas.forecasting.production.tournament import (
+    BacktestTagRefresher,
+    BacktestTrimmer,
     BlendedScore,
     BlendedScorer,
     Contender,
@@ -47,6 +55,7 @@ from natgas.forecasting.production.tournament import (
     LegacyStageRelabeler,
     ModelRules,
     ModelTournament,
+    ProductionHistoryReset,
     TournamentConfig,
     TournamentSeeder,
 )
@@ -718,3 +727,183 @@ def test_standings_command_before_any_round(
     result = CliRunner().invoke(cli.app, ["tournament", "standings"])
     assert result.exit_code == 0
     assert "no tournament results yet" in result.output
+
+
+# Replaying past days as production
+
+LEAKED_HDD = 999.0
+SIM_END = date(2024, 5, 1)
+
+
+def leak_future_weather(settings: Settings, after: date) -> None:
+    """Mark every weather row after a day, so any use of it is easy to spot."""
+    with get_engine(settings.db_url).begin() as connection:
+        connection.execute(
+            text("UPDATE weather_daily SET hdd = :hdd WHERE date > :day"),
+            {"hdd": LEAKED_HDD, "day": after},
+        )
+
+
+def simulator_for(settings: Settings) -> TournamentSimulator:
+    boosting = GradientBoostingModelConfig(use_weather=True, max_iter=20, n_lags=3)
+    registry = FakeRegistry(
+        [
+            contender("gradient_boosting", "champion", 1, boosting),
+            contender("gradient_boosting", "challenger", 2, replace(boosting, n_lags=5)),
+            contender("naive", "baseline", 1, NAIVE),
+        ]
+    )
+    config = TournamentConfig(families=["gradient_boosting"])
+    return TournamentSimulator(settings, config, 30, "high", registry)
+
+
+def test_replay_run_ids_are_marked() -> None:
+    run_id = TournamentSimulator.run_id_for(pd.Timestamp("2026-08-26"))
+    assert run_id.startswith("sim_20260826_")
+    assert len(run_id) == 32
+
+
+def test_replay_provider_sees_nothing_after_the_day(filled_settings: Settings) -> None:
+    leak_future_weather(filled_settings, SIM_END)
+    simulator = simulator_for(filled_settings)
+    sim_day = pd.Timestamp(SIM_END)
+    provider = simulator.provider_for(sim_day)
+    window = provider.window(sim_day)
+    assert provider.last_date == sim_day
+    assert window.training_data.index.max() == sim_day
+    assert window.test_target.isna().all()
+    assert window.future_features.index.min() > sim_day
+    # Every future date gets the normals from weather up to the day, never the marked rows
+    assert (window.future_features["hdd"] < LEAKED_HDD).all()
+    assert (window.training_data["hdd"] < LEAKED_HDD).all()
+    weather = next(
+        source
+        for source in provider.feature_sources
+        if isinstance(source, ForecastWeatherFeatureSource)
+    )
+    assert weather.daily.index.max() == sim_day
+    normals = weather.normals(sim_day)
+    expected = normals.loc[window.future_features.index.dayofyear, "hdd"].to_numpy()
+    assert window.future_features["hdd"].to_numpy() == pytest.approx(expected)
+    assert set(simulator.weather_days(provider, sim_day)) == {"normal"}
+
+
+def test_replay_check_catches_future_weather(filled_settings: Settings) -> None:
+    simulator = simulator_for(filled_settings)
+    sim_day = pd.Timestamp(SIM_END)
+    leaky = simulator.provider_for(sim_day)
+    leaky.feature_sources[0] = ForecastWeatherFeatureSource(simulator.weather)
+    with pytest.raises(ValueError, match="weather after"):
+        TournamentSimulator.check_no_future_data(leaky, sim_day)
+
+
+def test_replay_builds_a_history_day_by_day(filled_settings: Settings, monkeypatch) -> None:
+    leak_future_weather(filled_settings, SIM_END)
+    simulator = simulator_for(filled_settings)
+    seen = []
+    original = simulator.provider_for
+
+    def spy(sim_day):
+        provider = original(sim_day)
+        weather = provider.feature_sources[0]
+        seen.append((sim_day, weather.daily.index.max(), provider.last_date))
+        return provider
+
+    monkeypatch.setattr(simulator, "provider_for", spy)
+    runs = simulator.run(SIM_END, 5)
+    days = simulator.simulation_days(SIM_END, 5)
+    assert [run.as_of_date for run in runs] == days
+    assert all(weather <= day and last <= day for day, weather, last in seen)
+    rows = read(filled_settings, "SELECT DISTINCT run_id, as_of_date FROM predictions")
+    assert len({as_of for _, as_of in rows}) == 5
+    assert all(run_id.startswith("sim_") and len(run_id) <= 32 for run_id, _ in rows)
+    stages = read(filled_settings, "SELECT DISTINCT stage FROM predictions ORDER BY stage")
+    assert [stage for (stage,) in stages] == [
+        "baseline:naive",
+        "gradient_boosting:challenger",
+        "gradient_boosting:champion",
+        "production",
+    ]
+    # Actuals only come from prices up to the last replayed day
+    (latest,) = read(filled_settings, "SELECT MAX(target_date) FROM forecast_actuals")[0]
+    assert date.fromisoformat(str(latest)) <= SIM_END
+    winners = read(filled_settings, "SELECT COUNT(*) FROM event_winners")
+    assert winners == [(15,)]
+    trials = read(filled_settings, "SELECT trial_days FROM challenger_trials ORDER BY as_of_date")
+    assert [days for (days,) in trials] == [0, 1, 2, 3, 4]
+
+
+def test_reset_clears_production_but_keeps_inputs(filled_settings: Settings) -> None:
+    item = contender("chronos", "champion", 1, CHRONOS)
+    add_forecasts(filled_settings, item, trading_days(3), 0.1)
+    removed = ProductionHistoryReset(filled_settings.db_url).clear()
+    assert removed["predictions"] == 90
+    assert removed["forecast_actuals"] == 90
+    assert read(filled_settings, "SELECT COUNT(*) FROM predictions") == [(0,)]
+    assert read(filled_settings, "SELECT COUNT(*) FROM prices") == [(500,)]
+
+
+def test_trimmer_drops_backtests_from_the_replayed_days(settings: Settings, tmp_path: Path) -> None:
+    as_of_dates = [date(2026, 8, 7), date(2026, 8, 21), date(2026, 9, 4), date(2026, 9, 18)]
+    rows = [
+        {
+            "model": "naive",
+            "as_of_date": as_of,
+            "horizon_day": day,
+            "target_date": as_of,
+            "model_version": "1",
+            "forecast": 3.0,
+            "lower": None,
+            "upper": None,
+            "actual": 3.1,
+        }
+        for as_of in as_of_dates
+        for day in (1, 2)
+    ]
+    with session_scope(settings.db_url) as session:
+        session.execute(insert(BacktestForecast), rows)
+    parquet = tmp_path / "backtest_forecasts.parquet"
+    pd.DataFrame(rows).to_parquet(parquet, index=False)
+    trimmed = BacktestTrimmer(settings.db_url, parquet).trim(date(2026, 8, 26))
+    assert trimmed == {"table": 4, "parquet": 4}
+    kept = read(settings, "SELECT DISTINCT as_of_date FROM backtest_forecasts ORDER BY 1")
+    assert [str(as_of) for (as_of,) in kept] == ["2026-08-07", "2026-08-21"]
+    frame = pd.read_parquet(parquet)
+    assert (pd.to_datetime(frame["as_of_date"]) < pd.Timestamp("2026-08-26")).all()
+    assert BacktestTrimmer(settings.db_url, parquet).trim(date(2026, 8, 26)) == {
+        "table": 0,
+        "parquet": 0,
+    }
+
+
+def test_backtest_tags_only_use_days_before_the_cutoff(seeded) -> None:
+    _, _, config = seeded
+    cutoff = date(2024, 3, 15)
+    refresher = BacktestTagRefresher(config)
+    refreshed = refresher.refresh(cutoff)
+    client = MlflowClient(config.tracking_uri)
+    runs = GridSearchRuns(config.tracking_uri)
+    assert {item["name"] for item in refreshed} == {
+        "natgas-chronos",
+        "natgas-gradient-boosting",
+        "natgas-naive",
+    }
+    for item in refreshed:
+        version = client.get_model_version(item["name"], item["version"])
+        source = client.get_run(client.get_run(version.run_id).data.tags["source_run_id"])
+        forecasts = runs.forecasts(source)
+        known = forecasts[forecasts["date"] < pd.Timestamp(cutoff)]
+        assert 0 < len(known) < len(forecasts)
+        assert item["rows"] == len(known)
+        mae = (known["prediction"] - known["actual"]).abs().mean()
+        assert float(version.tags["backtest_mae"]) == pytest.approx(mae, abs=1e-6)
+        assert version.tags["backtest_cutoff"] == "2024-03-15"
+        early = known[known["step"] <= 5]
+        assert float(version.tags["backtest_mae_days_1_to_5"]) == pytest.approx(
+            (early["prediction"] - early["actual"]).abs().mean(), abs=1e-6
+        )
+    # The scorecard reads the new tags
+    contenders = FamilyRegistry(config).load_all()
+    naive = next(item for item in contenders if item.role == "baseline")
+    tags = client.get_model_version("natgas-naive", naive.version).tags
+    assert naive.backtest_mae["all days"] == pytest.approx(float(tags["backtest_mae"]))
