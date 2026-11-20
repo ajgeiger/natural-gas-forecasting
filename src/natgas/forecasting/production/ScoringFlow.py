@@ -15,6 +15,8 @@ from prefect.schedules import Cron
 from natgas.config import load_settings
 from natgas.forecasting.production.ScoringPipeline import ScoringPipeline
 from natgas.forecasting.production.ScoringRun import ScoringRun
+from natgas.forecasting.production.tournament.TournamentConfig import TournamentConfig
+from natgas.forecasting.production.tournament.TournamentOutcome import TournamentOutcome
 from natgas.forecasting.tuning.TuningConfig import TuningConfig
 
 FLOW_NAME = "natgas-daily-scoring"
@@ -33,7 +35,8 @@ class ScoringFlow:
     for the as-of date is skipped by the prediction store.
 
     refresh_data retries twice, 30 seconds apart, because Yahoo, Open-Meteo,
-    and EIA sometimes fail for a moment. Scoring and actuals do not retry: a
+    and EIA sometimes fail for a moment. Scoring, actuals, and the tournament
+    do not retry: a
     failure there is a real problem and should show as failed in the UI.
 
     Tasks use NO_CACHE, so every run does the work again instead of reusing
@@ -42,7 +45,12 @@ class ScoringFlow:
 
     @staticmethod
     def pipeline_for(config: str, refresh: bool) -> ScoringPipeline:
-        return ScoringPipeline(load_settings(), TuningConfig.from_yaml(config), refresh=refresh)
+        return ScoringPipeline(
+            load_settings(),
+            TuningConfig.from_yaml(config),
+            refresh=refresh,
+            tournament=TournamentConfig.from_yaml(config),
+        )
 
     @staticmethod
     def forward_logs() -> None:
@@ -63,6 +71,9 @@ class ScoringFlow:
             "saved": dict(run.saved),
             "weather_days": dict(run.weather_days),
             "actuals": run.actuals,
+            "events": dict(run.events),
+            "promoted": list(run.promoted),
+            "stitched": run.stitched,
         }
 
     @staticmethod
@@ -90,14 +101,24 @@ class ScoringFlow:
         return actuals
 
     @staticmethod
+    @task(name="run_tournament", cache_policy=NO_CACHE)
+    def run_tournament(pipeline: ScoringPipeline, scored: ScoringRun) -> TournamentOutcome:
+        outcome = pipeline.run_tournament(scored)
+        for bucket, winner in outcome.winners().items():
+            print(f"{bucket} winner: {winner}")
+        print(f"promoted: {outcome.promoted or 'none'}, production rows: {outcome.stitched}")
+        return outcome
+
+    @staticmethod
     @flow(name=FLOW_NAME, log_prints=True)
     def daily_scoring(refresh: bool = True, config: str = DEFAULT_CONFIG) -> dict[str, Any]:
-        """Refresh data, score production and staging, and backfill actuals."""
+        """Refresh data, score the contenders, backfill actuals, and run the tournament."""
         ScoringFlow.forward_logs()
         pipeline = ScoringFlow.pipeline_for(config, refresh)
         loaded = ScoringFlow.refresh_data(pipeline)
         scored = ScoringFlow.score_models(pipeline)
         actuals = ScoringFlow.backfill_actuals(pipeline, scored.as_of_date.date())
+        outcome = ScoringFlow.run_tournament(pipeline, scored)
         run = ScoringRun(
             run_id=scored.run_id,
             run_timestamp=scored.run_timestamp,
@@ -106,12 +127,15 @@ class ScoringFlow:
             saved=scored.saved,
             actuals=actuals,
             weather_days=scored.weather_days,
+            events=outcome.winners(),
+            promoted=outcome.promoted,
+            stitched=outcome.stitched,
         )
         summary = ScoringFlow.summary(run)
         print(
             f"run {summary['run_id']} as of {summary['as_of_date']}: "
             f"saved {summary['saved']}, weather {summary['weather_days']}, "
-            f"{summary['actuals']} matured"
+            f"{summary['actuals']} matured, winners {summary['events']}"
         )
         return summary
 
@@ -132,7 +156,7 @@ class ScoringFlow:
             name=DEPLOYMENT_NAME,
             schedule=Cron(cron, timezone=timezone),
             parameters={"refresh": True, "config": self.config},
-            description="Refresh data, score production and staging, backfill actuals.",
+            description="Refresh data, score the contenders, backfill actuals, run the tournament.",
             tags=["natgas", "production"],
             global_limit=1,
         )

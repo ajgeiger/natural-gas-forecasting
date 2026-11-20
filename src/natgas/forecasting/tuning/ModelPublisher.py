@@ -14,6 +14,7 @@ from mlflow.models import infer_signature
 import natgas
 from natgas.forecasting.backtesting.BacktestReport import BacktestReport
 from natgas.forecasting.data.ForecastDataProvider import ForecastDataProvider
+from natgas.forecasting.models.base.AbstractConfigWrapper import AbstractConfigWrapper
 from natgas.forecasting.models.ModelCatalog import ModelCatalog
 from natgas.forecasting.tuning.MlflowModelAdapter import MODEL_FOLDER_KEY, MlflowModelAdapter
 from natgas.forecasting.tuning.PublishDecision import PublishDecision
@@ -44,6 +45,8 @@ class ModelPublisher:
     publish() retrains the chosen config on every row up to the latest date,
     logs it as an MLflow pyfunc model with the package code bundled in,
     registers it, and points an alias such as "champion" at the new version.
+    publish_config() does the same for a config whose backtest scores are
+    already known, which is how the tournament seeds each family registry.
     """
 
     def __init__(
@@ -81,15 +84,40 @@ class ModelPublisher:
         )
         return PublishDecision(baseline, reason, improvement)
 
+    @staticmethod
+    def report_metrics(report: BacktestReport) -> dict[str, float]:
+        """Overall scores plus scores per horizon bucket, named like mae_days_1_to_5."""
+        metrics = dict(report.metrics())
+        for bucket, scores in report.metrics_by_bucket().iterrows():
+            for name, value in scores.items():
+                metrics[f"{name}_{bucket.replace(' ', '_')}"] = float(value)
+        return metrics
+
     def publish(self, decision: PublishDecision, as_of: pd.Timestamp | None = None) -> str:
         """Train, log, and register the chosen model. Returns the new version number."""
         report = decision.report
+        metrics = self.report_metrics(report)
+        return self.publish_config(report.config, metrics, decision.reason, as_of)
+
+    def publish_config(
+        self,
+        config: AbstractConfigWrapper,
+        metrics: dict[str, float],
+        reason: str,
+        as_of: pd.Timestamp | None = None,
+    ) -> str:
+        """Train a config on data through as_of, log it, register it, and set the alias.
+
+        metrics are its backtest scores. They are logged to the run and saved
+        as backtest_ tags on the version, so the tournament can read the
+        backtest MAE of each horizon bucket without running anything again.
+        """
         as_of = pd.Timestamp(as_of) if as_of is not None else self.provider.last_date
         window = self.provider.window(as_of)
-        model = ModelCatalog.build(report.config)
+        model = ModelCatalog.build(config)
         model.train(window.training_data)
 
-        features = window.future_features[report.config.required_features]
+        features = window.future_features[config.required_features]
         example_input = features.reset_index(names="date")
         example_output = (
             model.predict(window.future_features).rename_axis("date").reset_index(name="prediction")
@@ -110,14 +138,12 @@ class ModelPublisher:
                 registered_model_name=self.registered_model_name,
             )
 
-        mlflow.set_tags(
-            {"model_name": report.model_name, "stage": "publish", "reason": decision.reason}
-        )
-        mlflow.log_params({"model_name": report.model_name, **report.config.to_mlflow_params()})
+        mlflow.set_tags({"model_name": config.model_name, "stage": "publish", "reason": reason})
+        mlflow.log_params({"model_name": config.model_name, **config.to_mlflow_params()})
         mlflow.log_params(
             {"trained_through": trained_through, "min_improvement": self.min_improvement}
         )
-        mlflow.log_metrics({f"backtest_{name}": value for name, value in report.metrics().items()})
+        mlflow.log_metrics({f"backtest_{name}": value for name, value in metrics.items()})
 
         version = str(info.registered_model_version)
         client = MlflowClient()
@@ -126,12 +152,12 @@ class ModelPublisher:
             self.registered_model_name,
             version,
             description=(
-                f"{report.model_name} {report.config.to_json()}, trained through "
-                f"{trained_through}. {decision.reason}."
+                f"{config.model_name} {config.to_json()}, trained through "
+                f"{trained_through}. {reason}."
             ),
         )
-        for name, value in report.metrics().items():
+        for name, value in metrics.items():
             client.set_model_version_tag(
-                self.registered_model_name, version, f"backtest_{name}", f"{value:.4f}"
+                self.registered_model_name, version, f"backtest_{name}", f"{value:.6f}"
             )
         return version

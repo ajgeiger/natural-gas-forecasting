@@ -22,7 +22,15 @@ ingest:
 tune:
 	natgas tune
 
-# Refresh data, score production and staging, backfill actuals
+# Champion and challenger per family from the latest grid search, once
+seed-tournament:
+	natgas tournament seed
+
+# Latest event winners, trials, and standings
+standings:
+	natgas tournament standings
+
+# Refresh data, score every contender, backfill actuals, run the tournament
 score:
 	natgas score
 
@@ -40,10 +48,7 @@ serve:
 export-backtests:
 	natgas export-backtests
 
-register-challenger:
-	natgas register-challenger
-
 spark-show:
 	natgas spark-show prices
 
-.PHONY: install lint format test init-db ingest tune score flow prefect-server serve export-backtests register-challenger spark-show
+.PHONY: install lint format test init-db ingest tune score flow prefect-server serve export-backtests seed-tournament standings spark-show

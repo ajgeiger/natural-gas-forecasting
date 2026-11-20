@@ -58,22 +58,25 @@ class GridSearchRuns:
             f"No finished {self.horizon_days} day grid search in {self.experiment_name}"
         )
 
-    def best_runs(self, search: Run) -> dict[str, Run]:
-        """The lowest scoring nested run for each model. Failed configs have no score."""
+    def ranked_runs(self, search: Run) -> dict[str, list[Run]]:
+        """Nested runs per model, lowest score first. Failed configs have no score."""
         children = self.client.search_runs(
             [search.info.experiment_id],
             f"tags.mlflow.parentRunId = '{search.info.run_id}'",
             max_results=5000,
         )
-        best: dict[str, Run] = {}
+        ranked: dict[str, list[Run]] = {}
         for run in children:
-            score = run.data.metrics.get(self.selection_metric)
-            if score is None:
+            if run.data.metrics.get(self.selection_metric) is None:
                 continue
-            name = run.data.tags["model_name"]
-            if name not in best or score < best[name].data.metrics[self.selection_metric]:
-                best[name] = run
-        return best
+            ranked.setdefault(run.data.tags["model_name"], []).append(run)
+        for runs in ranked.values():
+            runs.sort(key=lambda run: run.data.metrics[self.selection_metric])
+        return ranked
+
+    def best_runs(self, search: Run) -> dict[str, Run]:
+        """The lowest scoring nested run for each model."""
+        return {name: runs[0] for name, runs in self.ranked_runs(search).items()}
 
     def forecasts(self, run: Run) -> pd.DataFrame:
         """The backtest forecasts logged with a run: date, as_of, step, actual, prediction."""

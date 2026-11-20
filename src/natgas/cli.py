@@ -1,10 +1,10 @@
-"""Command line entry point: natgas init-db, ingest, tune, score, flow, serve, export-backtests,
-spark-show."""
+"""Command line entry point: natgas init-db, ingest, tune, tournament, score, flow, serve,
+export-backtests, spark-show."""
 
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 
 import typer
 
@@ -16,16 +16,27 @@ from natgas.de.weather import WeatherLoader
 from natgas.forecasting.data import ForecastDataProvider
 from natgas.forecasting.production import (
     BacktestExporter,
-    ChallengerPublisher,
     GridSearchRuns,
     ScoringFlow,
     ScoringPipeline,
+    StageColumnMigrator,
+)
+from natgas.forecasting.production.ScoringPipeline import MARKET_TIMEZONE
+from natgas.forecasting.production.tournament import (
+    LegacyStageRelabeler,
+    TournamentConfig,
+    TournamentSeeder,
+    TournamentStore,
 )
 from natgas.forecasting.tuning import TuningConfig, TuningPipeline
 
 app = typer.Typer(help="Natural gas forecasting pipeline.", no_args_is_help=True)
 ingest_app = typer.Typer(help="Load source data into the database.", no_args_is_help=True)
 app.add_typer(ingest_app, name="ingest")
+tournament_app = typer.Typer(
+    help="Family trials, horizon events, and the published forecast.", no_args_is_help=True
+)
+app.add_typer(tournament_app, name="tournament")
 
 LOADERS = {"prices": PriceLoader, "weather": WeatherLoader, "storage": StorageLoader}
 
@@ -162,21 +173,68 @@ def export_backtests_command(
     typer.echo(f"backtest_forecasts: {rows} rows, also in {output}")
 
 
-@app.command("register-challenger")
-def register_challenger_command(
+@tournament_app.command("seed")
+def tournament_seed_command(
     config: str = TuningOption,
-    model: str = typer.Option("gradient_boosting", help="Model whose best config to register."),
+    force: bool = typer.Option(False, help="Seed again even if a family has a champion."),
+    relabel_legacy: bool = typer.Option(
+        True, help="Rename pre-tournament production and staging rows to legacy stages."
+    ),
 ) -> None:
-    """Register the best grid search config of a model under the challenger alias."""
+    """Give each family a champion and a challenger from the latest grid search."""
     settings, tuning, runs = grid_search_setup(config)
+    tournament = TournamentConfig.from_yaml(config)
     provider = ForecastDataProvider.from_settings(
         settings, tuning.horizon_days, tuning.target_column
     )
-    publisher = ChallengerPublisher(
-        runs, provider, tuning.registered_model_name, model, n_jobs=tuning.n_jobs
-    )
-    version = publisher.publish()
-    typer.echo(f"registered {tuning.registered_model_name} version {version} as @challenger")
+    # Train through the last complete trading day, the same as-of date scoring uses
+    today = datetime.now(MARKET_TIMEZONE).date()
+    as_of = ScoringPipeline.last_complete_day(provider, today)
+    seeded = TournamentSeeder(runs, provider, tournament, as_of).seed(force=force)
+    for item in seeded:
+        typer.echo(
+            f"{item.registered_model}@{item.role}: version {item.version} "
+            f"({item.source_run}, mae {item.mae:.4f})"
+        )
+    StageColumnMigrator(settings.db_url).migrate()
+    if relabel_legacy:
+        renamed = LegacyStageRelabeler(settings.db_url).relabel()
+        typer.echo(f"legacy rows relabeled: {renamed}")
+
+
+@tournament_app.command("standings")
+def tournament_standings_command() -> None:
+    """Print the latest event winners, trials, and standings."""
+    settings = load_settings()
+    init_db(settings.db_url)
+    store = TournamentStore(settings.db_url)
+    winners = store.latest("event_winners")
+    if winners.empty:
+        typer.echo("no tournament results yet, run natgas score")
+        return
+    columns = ["horizon_bucket", "stage", "model_version", "blended_mae", "improvement"]
+    typer.echo(f"event winners as of {winners['as_of_date'].iloc[0]}:")
+    typer.echo(winners[columns].to_string(index=False))
+    trials = store.latest("challenger_trials")
+    columns = ["family", "trial_days", "required_days", "champion_mae", "challenger_mae", "status"]
+    typer.echo("\nchallenger trials:")
+    typer.echo(trials[columns].to_string(index=False))
+    standings = store.latest("tournament_standings")
+    columns = ["horizon_bucket", "rank", "stage", "prod_days", "blended_mae", "qualified"]
+    typer.echo("\nstandings:")
+    typer.echo(standings.sort_values(["horizon_bucket", "rank"])[columns].to_string(index=False))
+
+
+def echo_run(summary: dict) -> None:
+    typer.echo(f"run {summary['run_id']} as of {summary['as_of_date']}")
+    typer.echo(f"loaded: {summary['loaded']}")
+    typer.echo(f"predictions saved: {summary['saved']}")
+    typer.echo(f"future weather days: {summary['weather_days']}")
+    typer.echo(f"matured forecasts in forecast_actuals: {summary['actuals']}")
+    for bucket, winner in summary["events"].items():
+        typer.echo(f"{bucket} winner: {winner}")
+    typer.echo(f"promoted: {summary['promoted'] or 'none'}")
+    typer.echo(f"production rows published: {summary['stitched']}")
 
 
 @app.command("score")
@@ -184,14 +242,14 @@ def score_command(
     config: str = TuningOption,
     refresh: bool = typer.Option(True, help="Load the newest data first."),
 ) -> None:
-    """Refresh data, score production and staging, and backfill actuals. Safe to rerun."""
-    settings = load_settings()
-    run = ScoringPipeline(settings, TuningConfig.from_yaml(config), refresh=refresh).run()
-    typer.echo(f"run {run.run_id} as of {run.as_of_date.date()}")
-    typer.echo(f"loaded: {run.loaded}")
-    typer.echo(f"predictions saved: {run.saved}")
-    typer.echo(f"future weather days: {run.weather_days}")
-    typer.echo(f"matured forecasts in forecast_actuals: {run.actuals}")
+    """Refresh data, score every contender, backfill actuals, and run the tournament."""
+    run = ScoringPipeline(
+        load_settings(),
+        TuningConfig.from_yaml(config),
+        refresh=refresh,
+        tournament=TournamentConfig.from_yaml(config),
+    ).run()
+    echo_run(ScoringFlow.summary(run))
 
 
 @app.command("flow")
@@ -200,12 +258,7 @@ def flow_command(
     refresh: bool = typer.Option(True, help="Load the newest data first."),
 ) -> None:
     """Run the scoring job once as a Prefect flow, tracked in the Prefect UI. Safe to rerun."""
-    summary = ScoringFlow(config).run_once(refresh=refresh)
-    typer.echo(f"run {summary['run_id']} as of {summary['as_of_date']}")
-    typer.echo(f"loaded: {summary['loaded']}")
-    typer.echo(f"predictions saved: {summary['saved']}")
-    typer.echo(f"future weather days: {summary['weather_days']}")
-    typer.echo(f"matured forecasts in forecast_actuals: {summary['actuals']}")
+    echo_run(ScoringFlow(config).run_once(refresh=refresh))
 
 
 @app.command("serve")

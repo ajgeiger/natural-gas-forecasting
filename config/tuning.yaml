@@ -19,10 +19,21 @@ search:
   selection_metric: mae    # mae, rmse, mape, or wape. Lowest wins.
 
 publish:
+  # Used by `natgas tune`, which still registers one overall winner.
   # The best model must beat naive by this share of error, else naive is published
   min_improvement: 0.01
   registered_model_name: natgas-price-forecaster
   alias: champion
+
+tournament:
+  # Each family has its own registry (natgas-chronos, natgas-gradient-boosting,
+  # natgas-greykite) with @champion and @challenger. naive is the baseline.
+  families: [chronos, gradient_boosting, greykite]
+  baseline: naive
+  registry_prefix: natgas-
+  trial_days: 60           # matured production days before a challenger can be promoted
+  window_days: 30          # production days in the blended scorecard
+  min_improvement: 0.01    # a champion must beat naive in an event by this share to qualify
 
 mlflow:
   # A database backend is needed for the model registry.

@@ -2,7 +2,6 @@
 
 from natgas.forecasting.production.ActualsRefresher import ActualsRefresher
 from natgas.forecasting.production.BacktestExporter import BacktestExporter
-from natgas.forecasting.production.ChallengerPublisher import ChallengerPublisher
 from natgas.forecasting.production.DataRefresher import DataRefresher
 from natgas.forecasting.production.ForecastMonitor import ForecastMonitor
 from natgas.forecasting.production.GridSearchRuns import GridSearchRuns
@@ -12,11 +11,11 @@ from natgas.forecasting.production.RegisteredModelLoader import RegisteredModelL
 from natgas.forecasting.production.ScoringFlow import ScoringFlow
 from natgas.forecasting.production.ScoringPipeline import ScoringPipeline
 from natgas.forecasting.production.ScoringRun import ScoringRun
+from natgas.forecasting.production.StageColumnMigrator import StageColumnMigrator
 
 __all__ = [
     "ActualsRefresher",
     "BacktestExporter",
-    "ChallengerPublisher",
     "DataRefresher",
     "ForecastMonitor",
     "GridSearchRuns",
@@ -26,4 +25,5 @@ __all__ = [
     "ScoringFlow",
     "ScoringPipeline",
     "ScoringRun",
+    "StageColumnMigrator",
 ]

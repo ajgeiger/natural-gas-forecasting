@@ -1,4 +1,5 @@
-"""The daily production job: refresh data, score, and backfill actuals."""
+"""The daily production job: refresh data, score the contenders, backfill actuals, and
+run the tournament."""
 
 from __future__ import annotations
 
@@ -20,8 +21,12 @@ from natgas.forecasting.production.DataRefresher import DataRefresher
 from natgas.forecasting.production.ForecastMonitor import ForecastMonitor
 from natgas.forecasting.production.PredictionStore import PredictionStore
 from natgas.forecasting.production.ProductionScorer import ProductionScorer
-from natgas.forecasting.production.RegisteredModelLoader import RegisteredModelLoader
 from natgas.forecasting.production.ScoringRun import ScoringRun
+from natgas.forecasting.production.StageColumnMigrator import StageColumnMigrator
+from natgas.forecasting.production.tournament.FamilyRegistry import FamilyRegistry
+from natgas.forecasting.production.tournament.ModelTournament import ModelTournament
+from natgas.forecasting.production.tournament.TournamentConfig import TournamentConfig
+from natgas.forecasting.production.tournament.TournamentOutcome import TournamentOutcome
 from natgas.forecasting.tuning.TuningConfig import TuningConfig
 
 log = logging.getLogger(__name__)
@@ -34,13 +39,18 @@ class ScoringPipeline:
 
     1. Refresh prices, weather (with the 14 day forecast), and storage
     2. Pick the as-of date: the latest trading day before today. Today's bar
-       is still trading, so it is never used, even after the close.
-    3. Score production (champion) and staging (challenger) into predictions
-    4. Copy matured forecasts with their actual prices into forecast_actuals
-    5. Recreate the accuracy views
+       is still trading, so it is never used, even after the close. Score
+       every family champion and challenger and the naive baseline into
+       predictions, each under its own stage
+    3. Copy matured forecasts with their actual prices into forecast_actuals
+       and recreate the accuracy views
+    4. Run the tournament: judge the 60 day trials and promote, score every
+       contender on the blended scorecard, pick the event winners, and
+       publish their stitched forecast as stage production
 
     Safe to run more than once a day: a stage already scored for the as-of
-    date is skipped, and the actuals step only rewrites matured rows.
+    date is skipped, the actuals step only rewrites matured rows, and the
+    tournament tables are keyed by as-of date.
     """
 
     def __init__(
@@ -49,11 +59,13 @@ class ScoringPipeline:
         tuning: TuningConfig,
         today: date | None = None,
         refresh: bool = True,
+        tournament: TournamentConfig | None = None,
     ) -> None:
         self.settings = settings
         self.tuning = tuning
         self.today = today or datetime.now(MARKET_TIMEZONE).date()
         self.refresh = refresh
+        self.tournament = tournament or TournamentConfig.from_tuning(tuning)
 
     @staticmethod
     def last_complete_day(provider: ForecastDataProvider, today: date) -> pd.Timestamp:
@@ -71,26 +83,31 @@ class ScoringPipeline:
                 return kinds.value_counts().to_dict()
         return {}
 
+    def prepare_database(self) -> None:
+        """Create missing tables and widen old stage columns."""
+        init_db(self.settings.db_url)
+        StageColumnMigrator(self.settings.db_url).migrate()
+
     def refresh_data(self) -> dict[str, int]:
         """Step 1: rows loaded per source, or nothing when refresh is off."""
-        init_db(self.settings.db_url)
+        self.prepare_database()
         if not self.refresh:
             return {}
         return DataRefresher(self.settings, self.today).refresh()
 
     def score_models(self) -> ScoringRun:
-        """Steps 2 and 3: score both stages. Loaded and actuals are left empty."""
+        """Step 2: score every contender. Loaded and actuals are left empty."""
         db_url = self.settings.db_url
-        init_db(db_url)
+        self.prepare_database()
         provider = ForecastDataProvider.from_settings(
             self.settings, self.tuning.horizon_days, self.tuning.target_column, live_weather=True
         )
         as_of = self.last_complete_day(provider, self.today)
         run_id = uuid4().hex
         run_timestamp = utc_now()
-        loader = RegisteredModelLoader(self.tuning.tracking_uri, self.tuning.registered_model_name)
-        scorer = ProductionScorer(provider, loader, PredictionStore(db_url))
-        saved = scorer.score(as_of, run_id, run_timestamp)
+        contenders = FamilyRegistry(self.tournament).load_all()
+        scorer = ProductionScorer(provider, PredictionStore(db_url))
+        saved = scorer.score(as_of, run_id, run_timestamp, contenders)
         return ScoringRun(
             run_id=run_id,
             run_timestamp=run_timestamp,
@@ -102,22 +119,37 @@ class ScoringPipeline:
         )
 
     def backfill_actuals(self, as_of_date: date) -> int:
-        """Steps 4 and 5: matured forecasts copied, then the accuracy views."""
+        """Step 3: matured forecasts copied, then the accuracy views."""
         db_url = self.settings.db_url
         actuals = ActualsRefresher(db_url, self.tuning.target_column).refresh(as_of_date)
         ForecastMonitor(db_url).create_views()
         return actuals
 
+    def run_tournament(self, scored: ScoringRun) -> TournamentOutcome:
+        """Step 4: trials, scorecard, events, and the stitched production forecast."""
+        tournament = ModelTournament(self.tournament, self.settings.db_url)
+        return tournament.run(scored.as_of_date.date(), scored.run_id, scored.run_timestamp)
+
     def run(self) -> ScoringRun:
         loaded = self.refresh_data()
         scored = self.score_models()
         actuals = self.backfill_actuals(scored.as_of_date.date())
-        run = replace(scored, loaded=loaded, actuals=actuals)
+        outcome = self.run_tournament(scored)
+        run = replace(
+            scored,
+            loaded=loaded,
+            actuals=actuals,
+            events=outcome.winners(),
+            promoted=outcome.promoted,
+            stitched=outcome.stitched,
+        )
         log.info(
-            "run %s as of %s: saved %s, %d matured",
+            "run %s as of %s: saved %s, %d matured, winners %s, promoted %s",
             run.run_id,
             run.as_of_date.date(),
             run.saved,
             run.actuals,
+            run.events,
+            run.promoted,
         )
         return run

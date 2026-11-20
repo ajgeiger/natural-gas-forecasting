@@ -10,6 +10,9 @@ from natgas.forecasting.data.SqlReader import SqlReader
 
 ROLLING_AS_OF_DATES = 20
 ALL_DAYS = "all days"
+# Production mixes the event winners, so a stage can hold more than one model
+MIXED_MODELS = "tournament"
+MODEL_LABEL = f"CASE WHEN MIN(model) = MAX(model) THEN MIN(model) ELSE '{MIXED_MODELS}' END"
 
 # Each forecast once in its own bucket and once in the all days bucket
 SCORED = f"""
@@ -22,7 +25,7 @@ ACCURACY_VIEW = f"""
 CREATE VIEW forecast_accuracy AS
 WITH scored AS ({SCORED})
 SELECT
-    model,
+    {MODEL_LABEL} AS model,
     stage,
     horizon_bucket,
     COUNT(*) AS forecasts,
@@ -34,7 +37,7 @@ SELECT
     100.0 * SUM(ABS(error)) / SUM(ABS(actual)) AS wape,
     AVG(error) AS bias
 FROM scored
-GROUP BY model, stage, horizon_bucket
+GROUP BY stage, horizon_bucket
 """
 
 ROLLING_VIEW = f"""
@@ -42,7 +45,7 @@ CREATE VIEW forecast_accuracy_rolling AS
 WITH scored AS ({SCORED}),
 by_date AS (
     SELECT
-        model,
+        {MODEL_LABEL} AS model,
         stage,
         horizon_bucket,
         as_of_date,
@@ -52,7 +55,7 @@ by_date AS (
         SUM(ABS(actual)) AS actual_total,
         SUM(error) AS error_total
     FROM scored
-    GROUP BY model, stage, horizon_bucket, as_of_date
+    GROUP BY stage, horizon_bucket, as_of_date
 ),
 rolling AS (
     SELECT
@@ -68,7 +71,7 @@ rolling AS (
         SUM(error_total) OVER recent AS error_total
     FROM by_date
     WINDOW recent AS (
-        PARTITION BY model, stage, horizon_bucket
+        PARTITION BY stage, horizon_bucket
         ORDER BY as_of_date
         ROWS BETWEEN {ROLLING_AS_OF_DATES - 1} PRECEDING AND CURRENT ROW
     )
@@ -110,7 +113,13 @@ ROLLING_COLUMNS = [
 
 
 class ForecastMonitor:
-    """MAE, MAPE, WAPE, and bias of matured forecasts, by model, stage, and horizon bucket.
+    """MAE, MAPE, WAPE, and bias of matured forecasts, by stage and horizon bucket.
+
+    Every stage gets its rows: production, each contender such as
+    chronos:champion or baseline:naive, and the legacy stages. A stage
+    normally holds one model, shown in the model column. Production stitches
+    the event winners together, so when its forecasts in a bucket come from
+    more than one model the column says "tournament".
 
     forecast_accuracy scores every matured forecast. forecast_accuracy_rolling
     gives, for each as-of date, the scores over that date and the 19 before it.
@@ -138,6 +147,6 @@ class ForecastMonitor:
     def rolling(self) -> pd.DataFrame:
         query = text(
             f"SELECT {', '.join(ROLLING_COLUMNS)} FROM forecast_accuracy_rolling "
-            "ORDER BY model, stage, horizon_bucket, as_of_date"
+            "ORDER BY stage, horizon_bucket, as_of_date"
         )
         return SqlReader.read(self.engine, query, ROLLING_COLUMNS)

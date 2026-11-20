@@ -29,12 +29,12 @@ from natgas.forecasting.optimization import GridSearchOptimizer
 from natgas.forecasting.production import (
     ActualsRefresher,
     BacktestExporter,
-    ChallengerPublisher,
     ForecastMonitor,
     GridSearchRuns,
     ProductionScorer,
     ScoringPipeline,
 )
+from natgas.forecasting.production.tournament import TournamentConfig
 from natgas.forecasting.tuning import ModelPublisher, PublishDecision, TuningConfig
 
 MODEL_NAME = "test-forecaster"
@@ -96,21 +96,55 @@ def tuning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TuningConfig:
     )
 
 
-def publish(provider: ForecastDataProvider, config, alias: str) -> str:
+CONTENDER_STAGES = [
+    "chronos:champion",
+    "chronos:challenger",
+    "gradient_boosting:champion",
+    "gradient_boosting:challenger",
+    "baseline:naive",
+]
+
+
+def publish(
+    provider: ForecastDataProvider, config, alias: str, registered_model_name: str = MODEL_NAME
+) -> str:
     dates = provider.backtest_dates("2024-01-01", "2024-04-30", step_days=60)
     report = Backtester(provider, dates).run(config)
     with mlflow.start_run():
-        publisher = ModelPublisher(provider, MODEL_NAME, alias)
+        publisher = ModelPublisher(provider, registered_model_name, alias)
         return publisher.publish(PublishDecision(report, "test", None))
 
 
 @pytest.fixture
-def registered(filled_settings: Settings, tuning: TuningConfig) -> TuningConfig:
-    """Chronos-2 with weather as champion and gradient boosting as challenger."""
+def tournament(tuning: TuningConfig) -> TournamentConfig:
+    return TournamentConfig(
+        families=["chronos", "gradient_boosting"], tracking_uri=tuning.tracking_uri
+    )
+
+
+@pytest.fixture
+def registered(
+    filled_settings: Settings, tuning: TuningConfig, tournament: TournamentConfig
+) -> TuningConfig:
+    """A champion and a challenger for Chronos-2 and gradient boosting, and naive."""
     provider = ForecastDataProvider.from_settings(filled_settings, 30)
-    publish(provider, ChronosModelConfig(context_length=64, use_weather=True), "champion")
-    challenger = GradientBoostingModelConfig(max_iter=20, n_lags=3, use_weather=False)
-    publish(provider, challenger, "challenger")
+    contenders = [
+        ("chronos", "champion", ChronosModelConfig(context_length=64, use_weather=True)),
+        ("chronos", "challenger", ChronosModelConfig(context_length=128, use_weather=True)),
+        (
+            "gradient_boosting",
+            "champion",
+            GradientBoostingModelConfig(max_iter=20, n_lags=3, use_weather=False),
+        ),
+        (
+            "gradient_boosting",
+            "challenger",
+            GradientBoostingModelConfig(max_iter=20, n_lags=5, use_weather=False),
+        ),
+        ("naive", "baseline", NaiveModelConfig()),
+    ]
+    for family, role, config in contenders:
+        publish(provider, config, role, tournament.registered_model(family))
     return tuning
 
 
@@ -201,33 +235,60 @@ def test_scoring_rules() -> None:
     ProductionScorer.check_rules(GradientBoostingModelConfig(use_weather=False))
 
 
-def test_scoring_pipeline_end_to_end(filled_settings: Settings, registered: TuningConfig) -> None:
-    first = ScoringPipeline(filled_settings, registered, date(2024, 7, 1), refresh=False).run()
+def pipeline(settings, tuning, tournament, today: date) -> ScoringPipeline:
+    return ScoringPipeline(settings, tuning, today, refresh=False, tournament=tournament)
+
+
+def test_scoring_pipeline_end_to_end(
+    filled_settings: Settings, registered: TuningConfig, tournament: TournamentConfig
+) -> None:
+    first = pipeline(filled_settings, registered, tournament, date(2024, 7, 1)).run()
     assert first.as_of_date == pd.Timestamp(LAST_PRICE)
-    assert first.saved == {"production": 30, "staging": 30}
+    assert first.saved == {stage: 30 for stage in CONTENDER_STAGES}
     assert first.weather_days == {"forecast": 9, "normal": 21}
+    assert set(first.events) == {"days 1 to 5", "days 6 to 15", "days 16 to 30"}
+    assert first.stitched == 30
     rows = read(
         filled_settings,
         "SELECT stage, model, model_version, COUNT(*), COUNT(lower), MIN(target_date), "
-        "MAX(horizon_day) FROM predictions GROUP BY stage, model, model_version ORDER BY stage",
+        "MAX(horizon_day) FROM predictions WHERE stage != 'production' "
+        "GROUP BY stage, model, model_version ORDER BY stage",
     )
     assert rows == [
-        ("production", "chronos", "1", 30, 30, "2024-07-01", 30),
-        ("staging", "gradient_boosting", "2", 30, 0, "2024-07-01", 30),
+        ("baseline:naive", "naive", "1", 30, 0, "2024-07-01", 30),
+        ("chronos:challenger", "chronos", "2", 30, 30, "2024-07-01", 30),
+        ("chronos:champion", "chronos", "1", 30, 30, "2024-07-01", 30),
+        ("gradient_boosting:challenger", "gradient_boosting", "2", 30, 0, "2024-07-01", 30),
+        ("gradient_boosting:champion", "gradient_boosting", "1", 30, 0, "2024-07-01", 30),
     ]
 
+    # Every published row is a copy of what the event winner forecast in its own stage
+    published = read(
+        filled_settings,
+        "SELECT p.horizon_day, p.model, p.model_version, w.stage, p.forecast, c.forecast "
+        "FROM predictions AS p "
+        "JOIN event_winners AS w ON w.as_of_date = p.as_of_date "
+        "AND p.horizon_day BETWEEN w.first_day AND w.last_day "
+        "JOIN predictions AS c ON c.as_of_date = p.as_of_date AND c.stage = w.stage "
+        "AND c.horizon_day = p.horizon_day "
+        "WHERE p.stage = 'production'",
+    )
+    assert len(published) == 30
+    assert all(forecast == copied for *_, forecast, copied in published)
+
     # A second run for the same day adds nothing
-    again = ScoringPipeline(filled_settings, registered, date(2024, 7, 1), refresh=False).run()
-    assert again.saved == {"production": 0, "staging": 0}
-    assert read(filled_settings, "SELECT COUNT(*) FROM predictions") == [(60,)]
+    again = pipeline(filled_settings, registered, tournament, date(2024, 7, 1)).run()
+    assert again.saved == {stage: 0 for stage in CONTENDER_STAGES}
+    assert again.stitched == 0
+    assert read(filled_settings, "SELECT COUNT(*) FROM predictions") == [(180,)]
 
     # Ten days later seven trading days of actuals are in, since July 4 is closed
     new_days = pd.bdate_range("2024-07-01", "2024-07-10").drop(pd.Timestamp("2024-07-04"))
     write_prices(filled_settings, new_days, seed=1)
-    later = ScoringPipeline(filled_settings, registered, date(2024, 7, 11), refresh=False).run()
+    later = pipeline(filled_settings, registered, tournament, date(2024, 7, 11)).run()
     assert later.as_of_date == pd.Timestamp("2024-07-10")
-    assert later.saved == {"production": 30, "staging": 30}
-    assert later.actuals == 14
+    assert later.saved == {stage: 30 for stage in CONTENDER_STAGES}
+    assert later.actuals == 6 * 7
 
     matured = read(
         filled_settings,
@@ -246,22 +307,37 @@ def test_scoring_pipeline_end_to_end(filled_settings: Settings, registered: Tuni
     expected_mae = np.mean([abs(error) for (error,) in errors])
     assert accuracy.loc[("production", "all days"), "mae"] == pytest.approx(expected_mae)
     assert accuracy.loc[("production", "all days"), "forecasts"] == 7
-    assert accuracy.loc[("staging", "days 1 to 5"), "forecasts"] == 5
+    for stage in CONTENDER_STAGES:
+        assert accuracy.loc[(stage, "days 1 to 5"), "forecasts"] == 5
+    assert accuracy.loc[("chronos:champion", "all days"), "model"] == "chronos"
 
     rolling = monitor.rolling()
     assert set(rolling["horizon_bucket"]) == {"days 1 to 5", "days 6 to 15", "all days"}
+    assert set(rolling["stage"]) == {"production", *CONTENDER_STAGES}
     assert rolling[["mae", "mape", "wape", "bias"]].notna().all().all()
 
+    # One matured as-of date now counts for 1/30 of each blended score
+    standings = read(
+        filled_settings,
+        "SELECT horizon_bucket, prod_days, prod_weight FROM tournament_standings "
+        "WHERE as_of_date = '2024-07-10' AND stage = 'chronos:champion'",
+    )
+    weights = {bucket: (days, weight) for bucket, days, weight in standings}
+    assert weights["days 1 to 5"] == (1, pytest.approx(1 / 30))
+    assert weights["days 16 to 30"] == (0, 0.0)
 
-def test_actuals_wait_for_a_complete_day(filled_settings: Settings, registered) -> None:
-    ScoringPipeline(filled_settings, registered, date(2024, 7, 1), refresh=False).run()
+
+def test_actuals_wait_for_a_complete_day(
+    filled_settings: Settings, registered: TuningConfig, tournament: TournamentConfig
+) -> None:
+    pipeline(filled_settings, registered, tournament, date(2024, 7, 1)).run()
     write_prices(filled_settings, pd.bdate_range("2024-07-01", periods=1), seed=1)
     refresher = ActualsRefresher(filled_settings.db_url)
     # The July 1 price is only used once July 1 is a complete day
     assert refresher.refresh(date(2024, 6, 28)) == 0
-    assert refresher.refresh(date(2024, 7, 1)) == 2
-    assert refresher.refresh(date(2024, 7, 1)) == 2
-    assert read(filled_settings, "SELECT COUNT(*) FROM forecast_actuals") == [(2,)]
+    assert refresher.refresh(date(2024, 7, 1)) == 6
+    assert refresher.refresh(date(2024, 7, 1)) == 6
+    assert read(filled_settings, "SELECT COUNT(*) FROM forecast_actuals") == [(6,)]
 
 
 def test_grid_search_configs_round_trip(grid_search: GridSearchRuns) -> None:
@@ -275,12 +351,17 @@ def test_grid_search_configs_round_trip(grid_search: GridSearchRuns) -> None:
     assert GridSearchRuns.parse("0.03", float) == 0.03
 
 
-def test_backtest_export_and_challenger(
+def test_backtest_export(
     grid_search: GridSearchRuns, filled_settings: Settings, tmp_path: Path
 ) -> None:
     provider = ForecastDataProvider.from_settings(filled_settings, 30)
-    assert ChallengerPublisher(grid_search, provider, MODEL_NAME).publish() == "1"
-    assert str(MlflowClient().get_model_version_by_alias(MODEL_NAME, "challenger").version) == "1"
+    search = grid_search.latest_search()
+    run = grid_search.best_runs(search)["gradient_boosting"]
+    with mlflow.start_run():
+        mlflow.set_tags({"search_run_id": search.info.run_id})
+        publisher = ModelPublisher(provider, MODEL_NAME, "champion")
+        publisher.publish_config(grid_search.config_for(run), {"mae": 1.0}, "test")
+    assert str(MlflowClient().get_model_version_by_alias(MODEL_NAME, "champion").version) == "1"
 
     exporter = BacktestExporter(grid_search, provider, filled_settings.db_url, MODEL_NAME)
     frame = exporter.build()
