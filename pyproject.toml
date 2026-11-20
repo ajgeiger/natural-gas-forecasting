@@ -68,3 +68,7 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# Torch must load before numpy and mlflow on Windows (WinError 1114).
+"notebooks/run_daily_update.ipynb" = ["I001", "F401"]

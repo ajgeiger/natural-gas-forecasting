@@ -341,6 +341,8 @@ natgas score --no-refresh    # score from the data already loaded
 natgas tournament standings  # what the last run decided
 ```
 
+Or open [`notebooks/run_daily_update.ipynb`](notebooks/run_daily_update.ipynb) and run all cells to do the same job by hand.
+
 ### Prefect
 
 `ScoringFlow` runs the same job as a Prefect 3 flow, `natgas-daily-scoring`, with one task per stage: `refresh_data` (retries twice, 30 seconds apart, for network hiccups at Yahoo, Open-Meteo, or EIA), `score_models`, `backfill_actuals`, and `run_tournament`. The tasks call `ScoringPipeline`'s stage methods, so `natgas score` and `natgas flow` write the same rows and reruns stay safe. The open-source Prefect server shows run history, each task's state and logs, failures with tracebacks, and the schedule at http://127.0.0.1:4200.
@@ -494,6 +496,7 @@ src/natgas/forecasting/ models, backtests, search, and publishing
 config/tuning.yaml      model grids and search spaces, backtest window, publish rule, MLflow,
                         tournament rules
 experiments/            grid search and Bayesian search notebooks
+notebooks/              daily update notebook, run all cells to refresh data and forecasts
 src/natgas/cli.py       natgas command
 tests/                  pytest, no network calls
 ```

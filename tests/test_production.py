@@ -1,6 +1,6 @@
 """Tests for production scoring, the backtest export, actuals, and monitoring. No network."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import mlflow
@@ -8,10 +8,10 @@ import numpy as np
 import pandas as pd
 import pytest
 from mlflow import MlflowClient
-from sqlalchemy import text
+from sqlalchemy import insert, text
 
 from natgas.config import Settings
-from natgas.db import Price, WeatherDaily, get_engine, session_scope, upsert
+from natgas.db import Prediction, Price, WeatherDaily, get_engine, session_scope, upsert
 from natgas.forecasting.backtesting import Backtester
 from natgas.forecasting.data import (
     ForecastDataProvider,
@@ -32,6 +32,7 @@ from natgas.forecasting.production import (
     ForecastMonitor,
     GridSearchRuns,
     ProductionScorer,
+    PublishedForecast,
     ScoringPipeline,
 )
 from natgas.forecasting.production.tournament import TournamentConfig
@@ -395,3 +396,63 @@ def test_export_adds_intervals_only_where_the_rerun_matches(
     assert with_intervals.loc[changed, "lower"].isna().all()
     assert with_intervals.loc[~changed, "lower"].notna().all()
     assert np.allclose(with_intervals["prediction"], logged["prediction"])
+
+
+def test_published_forecast_returns_the_newest_production_rows(settings: Settings) -> None:
+    run_time = datetime(2024, 6, 28, tzinfo=timezone.utc)
+    rows = []
+    for as_of, value in ((date(2024, 6, 27), 2.5), (date(2024, 6, 28), 3.5)):
+        for day in range(1, 31):
+            rows.append(
+                {
+                    "as_of_date": as_of,
+                    "stage": "production",
+                    "horizon_day": day,
+                    "run_id": "r" * 32,
+                    "run_timestamp": run_time,
+                    "target_date": as_of,
+                    "model": "tournament",
+                    "model_version": "1",
+                    "forecast": value + 0.01 * day,
+                    "lower": value,
+                    "upper": value + 1,
+                }
+            )
+    rows.append(
+        {
+            "as_of_date": date(2024, 6, 28),
+            "stage": "chronos:champion",
+            "horizon_day": 1,
+            "run_id": "r" * 32,
+            "run_timestamp": run_time,
+            "target_date": date(2024, 6, 28),
+            "model": "chronos",
+            "model_version": "1",
+            "forecast": 9.9,
+            "lower": None,
+            "upper": None,
+        }
+    )
+    with session_scope(settings.db_url) as session:
+        upsert(
+            session,
+            Price,
+            [
+                {"date": date(2024, 6, 20), "high": 2.0, "source": "test"},
+                {"date": date(2024, 6, 28), "high": 3.2, "source": "test"},
+            ],
+        )
+        session.execute(insert(Prediction), rows)
+
+    published = PublishedForecast(settings.db_url)
+    forecast = published.latest()
+    assert len(forecast) == 30
+    assert set(pd.to_datetime(forecast["as_of_date"]).dt.date) == {date(2024, 6, 28)}
+    assert forecast["forecast"].iloc[0] == pytest.approx(3.51)
+    assert list(forecast["horizon_day"]) == list(range(1, 31))
+
+    latest_price = published.prices(days=1)
+    assert list(latest_price["high"]) == [pytest.approx(3.2)]
+    recent = published.prices(days=10)
+    assert len(recent) == 2
+    assert list(pd.to_datetime(recent["date"]).dt.date) == [date(2024, 6, 20), date(2024, 6, 28)]
