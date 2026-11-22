@@ -4,19 +4,6 @@ Daily forecasts of the natural gas front-month futures price (Yahoo Finance `NG=
 
 The goal is a small system that runs on its own: pull fresh data each day, keep several models in play, use the most accurate approved one for the published forecast, and track accuracy as actual prices come in.
 
-## Roadmap
-
-- [x] Database and data loaders for prices, weather, and storage
-- [x] Spark access to the database over JDBC
-- [ ] Data checks for stale, missing, and duplicate data
-- [x] Shared model interface (train, predict, save, load) with naive and gradient boosting models
-- [ ] ARIMA, Greykite, and Chronos-2 models on the same interface
-- [x] Rolling-origin backtests and a scoreboard (MAE, RMSE, MAPE, WAPE, bias)
-- [x] Hyperparameter search logged to MLflow, best model registered as `champion`
-- [ ] Model stages: Testing, Challenger, Champion, Legacy Champion
-- [ ] Daily forecast and weekly retrain jobs in GitHub Actions
-- [ ] Streamlit dashboard
-
 ## Quickstart
 
 Requires Python 3.10 (Greykite does not support newer versions yet).
