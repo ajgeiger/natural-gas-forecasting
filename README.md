@@ -506,23 +506,6 @@ src/cli.py              natgas command
 tests/                  pytest, no network calls
 ```
 
-## Roadmap
-
-- [x] Database and data loaders for prices, weather, and storage
-- [x] Spark access to the database over JDBC
-- [ ] Data checks for stale, missing, and duplicate data
-- [x] Shared model interface (train, predict, save, load) with a config class per model
-- [x] Naive, gradient boosting, Greykite, and Chronos-2 models on the same interface
-- [ ] ARIMA models
-- [x] Rolling-origin backtests and a scoreboard (MAE, RMSE, MAPE, WAPE, bias)
-- [x] Grid and Bayesian search logged to MLflow, winner registered as `champion` only if it beats naive
-- [x] Model stages: Challenger, Champion, Legacy Champion, per model family
-- [x] Daily scoring job (`natgas score`) for every family champion and challenger and naive, with actuals and accuracy views
-- [x] Model tournament: 60 day challenger trials, horizon events, and a stitched production forecast
-- [ ] Send each new tuning run's best config per family into trials as `@challenger`
-- [ ] Run the scoring job on a schedule, and a weekly retrain
-- [ ] Streamlit dashboard
-
 ## Sources
 
 Data:
