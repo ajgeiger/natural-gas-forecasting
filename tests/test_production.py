@@ -10,33 +10,33 @@ import pytest
 from mlflow import MlflowClient
 from sqlalchemy import insert, text
 
-from natgas.config import Settings
-from natgas.db import Prediction, Price, WeatherDaily, get_engine, session_scope, upsert
-from natgas.forecasting.backtesting import Backtester
-from natgas.forecasting.data import (
+from backtesting import Backtester
+from config import Settings
+from data import (
     ForecastDataProvider,
     ForecastWeatherFeatureSource,
     TradingCalendar,
     WeatherFeatureSource,
 )
-from natgas.forecasting.models import (
+from data.database import Prediction, Price, WeatherDaily, get_engine, session_scope, upsert
+from models import (
     ChronosModelConfig,
     GradientBoostingModelConfig,
     GreykiteModelConfig,
     NaiveModelConfig,
 )
-from natgas.forecasting.optimization import GridSearchOptimizer
-from natgas.forecasting.production import (
-    ActualsRefresher,
-    BacktestExporter,
-    ForecastMonitor,
-    GridSearchRuns,
-    ProductionScorer,
-    PublishedForecast,
-    ScoringPipeline,
-)
-from natgas.forecasting.production.tournament import TournamentConfig
-from natgas.forecasting.tuning import ModelPublisher, PublishDecision, TuningConfig
+from optimization.config.TuningConfig import TuningConfig
+from optimization.optimizers.GridSearchOptimizer import GridSearchOptimizer
+from production.publishing.ActualsRefresher import ActualsRefresher
+from production.publishing.BacktestExporter import BacktestExporter
+from production.publishing.ForecastMonitor import ForecastMonitor
+from production.publishing.PublishedForecast import PublishedForecast
+from production.registry.GridSearchRuns import GridSearchRuns
+from production.registry.ModelPublisher import ModelPublisher
+from production.registry.PublishDecision import PublishDecision
+from production.scoring.ProductionScorer import ProductionScorer
+from production.scoring.ScoringPipeline import ScoringPipeline
+from production.tournament.TournamentConfig import TournamentConfig
 
 MODEL_NAME = "test-forecaster"
 LAST_PRICE = date(2024, 6, 28)

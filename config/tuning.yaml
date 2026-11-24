@@ -1,5 +1,5 @@
 # Settings for `natgas tune` and the experiment notebooks.
-# Each model maps to its config class in src/natgas/forecasting/models.
+# Each model maps to its config class in src/models.
 # "grid" is used by grid search, "search_space" by Bayesian search.
 # Leave either out to use the config class defaults.
 

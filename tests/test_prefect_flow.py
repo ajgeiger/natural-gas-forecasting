@@ -4,7 +4,8 @@ import pandas as pd
 import pytest
 from prefect.testing.utilities import prefect_test_harness
 
-from natgas.forecasting.production import ScoringFlow, ScoringRun
+from production.scoring.ScoringFlow import ScoringFlow
+from production.scoring.ScoringRun import ScoringRun
 
 
 @pytest.fixture(scope="module", autouse=True)

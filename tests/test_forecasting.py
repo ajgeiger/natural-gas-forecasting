@@ -8,8 +8,8 @@ import pandas as pd
 import pytest
 from mlflow import MlflowClient
 
-from natgas.forecasting.backtesting import Backtester, BacktestReport, ForecastMetrics
-from natgas.forecasting.data import (
+from backtesting import Backtester, BacktestReport, ForecastMetrics
+from data import (
     AbstractFeatureSource,
     CalendarFeatureSource,
     ForecastDataProvider,
@@ -17,7 +17,7 @@ from natgas.forecasting.data import (
     StorageFeatureSource,
     WeatherFeatureSource,
 )
-from natgas.forecasting.models import (
+from models import (
     AbstractConfigWrapper,
     AbstractModelWrapper,
     ChronosModel,
@@ -29,13 +29,13 @@ from natgas.forecasting.models import (
     NaiveModel,
     NaiveModelConfig,
 )
-from natgas.forecasting.optimization import (
-    BayesianOptimizer,
-    GridSearchOptimizer,
-    HyperparameterGrid,
-    OptimizerCatalog,
-)
-from natgas.forecasting.tuning import ModelPublisher, TuningConfig, TuningPipeline
+from optimization.config.TuningConfig import TuningConfig
+from optimization.optimizers.BayesianOptimizer import BayesianOptimizer
+from optimization.optimizers.GridSearchOptimizer import GridSearchOptimizer
+from optimization.optimizers.OptimizerCatalog import OptimizerCatalog
+from optimization.pipeline.TuningPipeline import TuningPipeline
+from optimization.search_space.HyperparameterGrid import HyperparameterGrid
+from production.registry.ModelPublisher import ModelPublisher
 
 
 @pytest.fixture(scope="module")

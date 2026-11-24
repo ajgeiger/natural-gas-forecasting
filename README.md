@@ -398,7 +398,7 @@ The accuracy views have one row per stage and bucket. Production mixes event win
 
 ## Spark
 
-The SQL database is the system of record and the loaders write to it. `SparkDatabase` in `src/natgas/de/spark_db.py` reads and writes the same tables over JDBC, so later jobs can run on Spark without moving the data.
+The SQL database is the system of record and the loaders write to it. `SparkDatabase` in `src/de/spark_db.py` reads and writes the same tables over JDBC, so later jobs can run on Spark without moving the data.
 
 ```bash
 pip install -e ".[dev,spark]"
@@ -406,8 +406,8 @@ natgas spark-show prices
 ```
 
 ```python
-from natgas.config import load_settings
-from natgas.de.spark_db import SparkDatabase
+from config import load_settings
+from de.spark_db import SparkDatabase
 
 database = SparkDatabase(load_settings().db_url)
 prices = database.read_table("prices")
@@ -458,46 +458,51 @@ Ingestion, backtesting, MLflow tracking, the family registries, the daily scorin
 
 ```
 config/settings.yaml    tickers, series, cities
-src/natgas/config.py    settings loader
-src/natgas/db/          tables, sessions, upsert
-src/natgas/de/          data loading
+src/config.py           settings loader
+src/de/                 data loading
   prices/               PriceLoader (Yahoo Finance)
   weather/              WeatherLoader (Open-Meteo)
   storage/              StorageLoader (EIA)
   utils.py              Loader base class, run logging, HTTP retries, date ranges
   spark_db.py           SparkDatabase, reads and writes the database over JDBC
-src/natgas/forecasting/ models, backtests, search, and publishing
-  data/                 ForecastDataProvider, ForecastWindow, SqlReader, TradingCalendar,
-                        AbstractFeatureSource, WeatherFeatureSource, HolidayFeatureSource,
+src/data/               data the models read
+  database/             ORM tables, engine and sessions, upsert, SqlReader
+  features/             AbstractFeatureSource, WeatherFeatureSource, HolidayFeatureSource,
                         CalendarFeatureSource, StorageFeatureSource,
                         ForecastWeatherFeatureSource
-  models/
-    base/               AbstractModelWrapper, AbstractConfigWrapper
-    naive/              NaiveModel, NaiveModelConfig
-    gradient_boosting/  GradientBoostingModel, GradientBoostingModelConfig
-    greykite/           GreykiteModel, GreykiteModelConfig
-    chronos/            ChronosModel, ChronosModelConfig
-    ModelCatalog.py     name to (model class, config class)
-  backtesting/          Backtester, BacktestResult, BacktestReport, ForecastMetrics
-  optimization/         AbstractOptimizer, GridSearchOptimizer, BayesianOptimizer,
-                        HyperparameterGrid, OptimizerCatalog
-  tuning/               TuningConfig, TuningPipeline, TuningOutcome, ModelPublisher,
-                        PublishDecision, MlflowModelAdapter
-  production/           ScoringPipeline, ScoringFlow, DataRefresher, ProductionScorer,
-                        PredictionStore, RegisteredModelLoader, ActualsRefresher,
-                        ForecastMonitor, ScoringRun, GridSearchRuns, BacktestExporter,
-                        StageColumnMigrator, TournamentSimulator
-    tournament/         TournamentConfig, Contender, FamilyRegistry, TournamentSeeder,
+  provider/             ForecastDataProvider, ForecastWindow, TradingCalendar
+src/models/
+  config/               AbstractModelWrapper, AbstractConfigWrapper
+  naive/                NaiveModel, NaiveModelConfig
+  gradient_boosting/    GradientBoostingModel, GradientBoostingModelConfig
+  greykite/             GreykiteModel, GreykiteModelConfig
+  chronos/              ChronosModel, ChronosModelConfig
+  ModelCatalog.py       name to (model class, config class)
+src/backtesting/        Backtester, BacktestResult, BacktestReport, ForecastMetrics
+src/optimization/
+  pipeline/             TuningPipeline, TuningOutcome
+  config/               TuningConfig
+  optimizers/           AbstractOptimizer, GridSearchOptimizer, BayesianOptimizer,
+                        OptimizerCatalog
+  search_space/         HyperparameterGrid
+src/production/
+  scoring/              ScoringPipeline, ScoringFlow, ScoringRun, DataRefresher,
+                        ProductionScorer, PredictionStore
+  tournament/           TournamentConfig, Contender, FamilyRegistry, TournamentSeeder,
                         SeededVersion, ModelRules, BlendedScorer, BlendedScore, TrialJudge,
                         ChallengerTrial, EventJudge, EventResult, ForecastStitcher,
-                        TournamentStore, ModelTournament, TournamentOutcome,
-                        LegacyStageRelabeler, BacktestTrimmer, BacktestTagRefresher,
-                        ProductionHistoryReset
+                        TournamentStore, ModelTournament, TournamentOutcome
+  publishing/           PublishedForecast, ActualsRefresher, ForecastMonitor, BacktestExporter
+  registry/             GridSearchRuns, RegisteredModelLoader, ModelPublisher,
+                        PublishDecision, MlflowModelAdapter
+  simulation/           TournamentSimulator, ProductionHistoryReset, BacktestTrimmer,
+                        BacktestTagRefresher
+  migrations/           StageColumnMigrator, LegacyStageRelabeler
 config/tuning.yaml      model grids and search spaces, backtest window, publish rule, MLflow,
                         tournament rules
 experiments/            grid search and Bayesian search notebooks
 notebooks/              daily update notebook, run all cells to refresh data and forecasts
-src/natgas/cli.py       natgas command
+src/cli.py              natgas command
 tests/                  pytest, no network calls
 ```
 

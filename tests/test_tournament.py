@@ -14,9 +14,11 @@ from mlflow import MlflowClient
 from sqlalchemy import insert, inspect, text
 from typer.testing import CliRunner
 
-from natgas import cli
-from natgas.config import Settings
-from natgas.db import (
+import cli
+from backtesting import Backtester
+from config import Settings
+from data import ForecastDataProvider, ForecastWeatherFeatureSource
+from data.database import (
     BacktestForecast,
     ForecastActual,
     Prediction,
@@ -27,38 +29,32 @@ from natgas.db import (
     session_scope,
     upsert,
 )
-from natgas.forecasting.backtesting import Backtester
-from natgas.forecasting.data import ForecastDataProvider, ForecastWeatherFeatureSource
-from natgas.forecasting.models import (
+from models import (
     ChronosModel,
     ChronosModelConfig,
     GradientBoostingModelConfig,
     GreykiteModelConfig,
     NaiveModelConfig,
 )
-from natgas.forecasting.optimization import GridSearchOptimizer
-from natgas.forecasting.production import (
-    GridSearchRuns,
-    PredictionStore,
-    StageColumnMigrator,
-    TournamentSimulator,
-)
-from natgas.forecasting.production.tournament import (
-    BacktestTagRefresher,
-    BacktestTrimmer,
-    BlendedScore,
-    BlendedScorer,
-    Contender,
-    EventJudge,
-    FamilyRegistry,
-    ForecastStitcher,
-    LegacyStageRelabeler,
-    ModelRules,
-    ModelTournament,
-    ProductionHistoryReset,
-    TournamentConfig,
-    TournamentSeeder,
-)
+from optimization.optimizers.GridSearchOptimizer import GridSearchOptimizer
+from production.migrations.LegacyStageRelabeler import LegacyStageRelabeler
+from production.migrations.StageColumnMigrator import StageColumnMigrator
+from production.registry.GridSearchRuns import GridSearchRuns
+from production.scoring.PredictionStore import PredictionStore
+from production.simulation.BacktestTagRefresher import BacktestTagRefresher
+from production.simulation.BacktestTrimmer import BacktestTrimmer
+from production.simulation.ProductionHistoryReset import ProductionHistoryReset
+from production.simulation.TournamentSimulator import TournamentSimulator
+from production.tournament.BlendedScore import BlendedScore
+from production.tournament.BlendedScorer import BlendedScorer
+from production.tournament.Contender import Contender
+from production.tournament.EventJudge import EventJudge
+from production.tournament.FamilyRegistry import FamilyRegistry
+from production.tournament.ForecastStitcher import ForecastStitcher
+from production.tournament.ModelRules import ModelRules
+from production.tournament.ModelTournament import ModelTournament
+from production.tournament.TournamentConfig import TournamentConfig
+from production.tournament.TournamentSeeder import TournamentSeeder
 
 RUN_TIME = datetime(2026, 11, 19, 12, tzinfo=timezone.utc)
 LAST_PRICE = date(2024, 6, 28)

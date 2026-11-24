@@ -54,7 +54,11 @@ spark = ["pyspark>=3.5,<4"]
 dashboard = []
 
 [project.scripts]
-natgas = "natgas.cli:app"
+natgas = "cli:app"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = ["cli", "config"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -72,3 +76,5 @@ testpaths = ["tests"]
 [tool.ruff.lint.per-file-ignores]
 # Torch must load before numpy and mlflow on Windows (WinError 1114).
 "notebooks/run_daily_update.ipynb" = ["I001", "F401"]
+"experiments/grid_search_backtest.ipynb" = ["I001", "F401"]
+"experiments/bayesian_backtest.ipynb" = ["I001", "F401"]

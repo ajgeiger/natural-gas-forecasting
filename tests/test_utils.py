@@ -4,8 +4,8 @@ import pytest
 import responses
 from sqlalchemy import select
 
-from natgas.db import IngestionRun, StorageWeekly, session_scope
-from natgas.de import utils
+from data.database import IngestionRun, StorageWeekly, session_scope
+from de import utils
 
 URL = "https://example.com/data"
 

@@ -1,12 +1,15 @@
+# Torch must load before numpy on Windows (WinError 1114)
+import torch  # noqa: F401  # isort: skip
+
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from natgas.config import Location, Settings
-from natgas.db import init_db
-from natgas.forecasting.models import ChronosModel, ChronosModelConfig
+from config import Location, Settings
+from data.database import init_db
+from models import ChronosModel, ChronosModelConfig
 
 
 @pytest.fixture
