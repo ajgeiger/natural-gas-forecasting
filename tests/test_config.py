@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from natgas.config import load_settings, resolve_db_url
+from config import load_settings, resolve_db_url
 
 REPO_CONFIG = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
 
@@ -27,5 +27,5 @@ def test_env_overrides(monkeypatch):
 
 def test_relative_sqlite_path_is_resolved(tmp_path):
     url = resolve_db_url("sqlite:///data/test.db", tmp_path)
-    assert url == f"sqlite:///{tmp_path / 'data' / 'test.db'}"
+    assert url == f"sqlite:///{(tmp_path / 'data' / 'test.db').as_posix()}"
     assert (tmp_path / "data").is_dir()

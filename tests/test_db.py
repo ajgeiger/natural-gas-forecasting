@@ -2,7 +2,7 @@ from datetime import date
 
 from sqlalchemy import func, select
 
-from natgas.db import Price, session_scope, upsert
+from data.database import Price, session_scope, upsert
 
 
 def price_row(day: date, high: float) -> dict:

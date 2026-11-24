@@ -3,8 +3,8 @@ from datetime import date, timedelta
 import pytest
 import responses
 
-from natgas.db import WeatherDaily, session_scope
-from natgas.de.weather import loader as weather
+from data.database import WeatherDaily, session_scope
+from de.weather import loader as weather
 
 
 def daily_payload(start: date, temps: list[float | None]) -> dict:

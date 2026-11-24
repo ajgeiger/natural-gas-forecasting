@@ -1,5 +1,6 @@
 install:
 	pip install -e ".[dev]"
+	pip install "chronos-forecasting>=2.0" --no-deps
 
 lint:
 	ruff check .
@@ -21,7 +22,33 @@ ingest:
 tune:
 	natgas tune
 
+# Champion and challenger per family from the latest grid search, once
+seed-tournament:
+	natgas tournament seed
+
+# Latest event winners, trials, and standings
+standings:
+	natgas tournament standings
+
+# Refresh data, score every contender, backfill actuals, run the tournament
+score:
+	natgas score
+
+# Same job as a Prefect flow, tracked in the Prefect UI
+flow:
+	natgas flow
+
+prefect-server:
+	prefect server start
+
+# Scheduled deployment natgas-daily-scoring, needs prefect-server running
+serve:
+	natgas serve
+
+export-backtests:
+	natgas export-backtests
+
 spark-show:
 	natgas spark-show prices
 
-.PHONY: install lint format test init-db ingest tune spark-show
+.PHONY: install lint format test init-db ingest tune score flow prefect-server serve export-backtests seed-tournament standings spark-show

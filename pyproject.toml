@@ -9,21 +9,41 @@ description = "Daily forecasts of natural gas futures prices"
 readme = "README.md"
 requires-python = ">=3.10,<3.11"
 authors = [{ name = "Alex Geiger" }]
+# Greykite 1.1 pins pandas below 2.0, numpy 1.26.0, and scikit-learn 1.3.1,
+# so the rest of the stack is kept compatible with those versions.
+# Chronos-2 (chronos-forecasting 2.x) declares pandas 2, which conflicts with
+# that pin. The forecast API we use works with pandas 1.5, so install it in a
+# second step: pip install "chronos-forecasting>=2.0" --no-deps
+# Prefect 3.8 allows FastAPI below 1.0, but its server breaks on newer FastAPI: from 0.151
+# filter requests with empty limit or sort get 422, and from 0.155 the server fails to
+# import (Body no longer takes min_items). So FastAPI is capped below 0.151.
 dependencies = [
+    "accelerate>=1.1,<2",
+    "einops>=0.7",
+    "fastapi>=0.139,<0.151",
+    "greykite==1.1.0",
+    "holidays>=0.13",
     "joblib>=1.3",
     "mlflow>=3.0",
     "numpy>=1.24",
-    "pandas>=2.0",
+    "optuna>=3.6",
+    "pandas>=1.5",
+    "prefect>=3,<4",
     "pyyaml>=6.0",
     "requests>=2.31",
-    "scikit-learn>=1.4",
+    "scikit-learn>=1.3",
     "sqlalchemy>=2.0",
+    "torch>=2.2",
+    "transformers>=4.41,<5",
     "typer>=0.12",
     "yfinance>=0.2.54",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "ipykernel>=6.0",
+    "ipywidgets>=8.0",
+    "nbconvert>=7.0",
     "pytest>=8.0",
     "responses>=0.25",
     "ruff>=0.6",
@@ -34,7 +54,11 @@ spark = ["pyspark>=3.5,<4"]
 dashboard = []
 
 [project.scripts]
-natgas = "natgas.cli:app"
+natgas = "cli:app"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = ["cli", "config"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -48,3 +72,9 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# Torch must load before numpy and mlflow on Windows (WinError 1114).
+"notebooks/run_daily_update.ipynb" = ["I001", "F401"]
+"experiments/grid_search_backtest.ipynb" = ["I001", "F401"]
+"experiments/bayesian_backtest.ipynb" = ["I001", "F401"]

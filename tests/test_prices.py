@@ -2,8 +2,8 @@ from datetime import date
 
 import pandas as pd
 
-from natgas.db import Price, session_scope
-from natgas.de.prices import loader as prices
+from data.database import Price, session_scope
+from de.prices import loader as prices
 
 
 def fake_history(*_args, **_kwargs) -> pd.DataFrame:

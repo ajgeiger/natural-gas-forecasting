@@ -32,3 +32,4 @@ derby.log
 .vscode/
 .idea/
 .DS_Store
+logs/

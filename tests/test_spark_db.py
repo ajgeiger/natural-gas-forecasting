@@ -4,8 +4,8 @@ from datetime import date
 
 import pytest
 
-from natgas.db import Price, session_scope, upsert
-from natgas.de.spark_db import SparkDatabase, jdbc_options
+from data.database import Price, session_scope, upsert
+from de.spark_db import SparkDatabase, jdbc_options
 
 has_java = bool(shutil.which("java") or os.getenv("JAVA_HOME"))
 

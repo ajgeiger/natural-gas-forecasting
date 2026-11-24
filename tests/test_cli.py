@@ -1,6 +1,6 @@
 from typer.testing import CliRunner
 
-from natgas import cli
+import cli
 
 runner = CliRunner()
 
